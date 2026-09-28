@@ -8,7 +8,7 @@ All notable changes to oath are documented here. Format follows
 ## [0.2.5] - 2026-07-16
 
 ### Changed
-- The Homebrew formula now installs the immutable Apache-2.0 `v0.2.4` source
+- The Homebrew formula now installs the immutable Apache-2.0 `v0.2.5` source
   archive with its verified SHA-256.
 - `oath init` now writes `UNLICENSED` instead of choosing MIT on behalf of a
   new project's author.
@@ -31,6 +31,8 @@ All notable changes to oath are documented here. Format follows
 - The macOS capability probe covers outside and system-secret reads, outside
   writes, child-process bypass, environment leakage, local network access, and
   resource limits. Protected CI checksums and attests the capability report.
+- Exact-commit release evidence passed 61 jobs with 100 reviewed workflows on
+  three operating systems, 250 pinned projects, and 10,000 generated executions.
 
 ## [0.2.4] - 2026-07-15
 

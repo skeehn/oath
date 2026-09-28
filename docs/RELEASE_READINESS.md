@@ -1,14 +1,12 @@
-# v0.2.4 release readiness
+# v0.2.5 release readiness
 
-Audit date: 2026-07-15
+Audit date: 2026-07-16
 
 ## Decision
 
-Oath `v0.2.4` is a **developer preview**. The CLI and the documented npm
-workflow slices are eligible for a preview tag only after the exact candidate
-commit passes the manually dispatched `release-evidence-gate`. The release
-workflow checks that exact-commit result before it builds or publishes assets
-and derives prerelease status from the signed evidence manifest.
+Oath `v0.2.5` is a **developer preview**. Its exact commit passed the manually
+dispatched `release-evidence-gate`; the release workflow revalidated that
+result before building and publishing the prerelease assets.
 
 Oath is **not GA**. The hosted registry is a business-beta control plane for
 isolated design-partner deployments with an operator. Detection quality,
@@ -29,13 +27,12 @@ and remains a GA governance gate.
 ## Audited full-evidence baseline
 
 Exact-master run
-[`29403483148`](https://github.com/Generalized-Labs/oath/actions/runs/29403483148)
-passed all 60 jobs and `release-evidence-gate` at commit
-`49f98e650ae3b5066463e585a8843189eb00ccfc`. The downloaded summaries
+[`29499711576`](https://github.com/Generalized-Labs/oath/actions/runs/29499711576)
+passed all 61 jobs and `release-evidence-gate` at commit
+`803f7883f8a663a5da56ab82a45c88d72ab9eee3`. The downloaded summaries
 independently aggregate to 100 reviewed workflow IDs on each supported CI OS,
 250 pinned projects, and 10,000 generated comparisons. This is the audited
-implementation baseline for that exact commit; the release-bump commit must
-pass the complete manually dispatched gate again before it can be tagged.
+implementation baseline for the signed `v0.2.5` tag and published prerelease.
 
 | Gate | Result |
 | --- | ---: |
@@ -48,7 +45,7 @@ pass the complete manually dispatched gate again before it can be tagged.
 | Pinned real-project trees | 250 / 250 |
 | Signed JavaScript, Python, and Go agent-contract verification | Pass |
 | PostgreSQL, OCI-container, and registry reliability checks | Pass |
-| Native Linux and Windows containment checks | Pass |
+| Native Linux, macOS, and Windows containment checks | Pass |
 | Public stable-release README smoke | Pass |
 | Exact-commit release evidence gate | Pass |
 
@@ -90,8 +87,9 @@ native-containment, registry, audit, reliability, 10,000-execution, and
   failure. `v0.2.2` added portable registry deployment, cross-language signed
   contract verification, immutable release assembly, and expanded npm parity.
   `v0.2.3` derives measured gate state from the evidence instead of retaining
-  stale hard-coded open labels. `v0.2.4` carries that correction forward while
-  changing the current and future Oath distribution license to Apache-2.0.
+  stale hard-coded open labels. `v0.2.4` changed the current and future Oath
+  distribution license to Apache-2.0. `v0.2.5` adds runtime-probed native macOS
+  containment and changes generated projects to `UNLICENSED`.
 - The real-project corpus now commits and digest-verifies 250 compressed npm
   lockfiles. Evidence runs no longer regenerate dependency resolution from
   mutable registry state, and npm and Oath consume the same pinned bytes through
@@ -126,7 +124,7 @@ native-containment, registry, audit, reliability, 10,000-execution, and
 1. Merge the reviewed candidate to `master`.
 2. Manually dispatch `.github/workflows/ci.yml` on the exact master commit.
 3. Require every job in `release-evidence-gate` to pass without exceptions.
-4. Create signed tag `v0.2.4` on that exact commit.
+4. Create a signed version tag on that exact commit.
 5. Let `.github/workflows/release.yml` revalidate version, changelog, MSRV,
    tests, dependency audits, website, exact-commit evidence, platform builds,
    checksums, and provenance before publishing the GitHub release.

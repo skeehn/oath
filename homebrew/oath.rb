@@ -5,8 +5,8 @@
 class Oath < Formula
   desc "Security-first JavaScript package workflow and assessed npx alternative"
   homepage "https://github.com/Generalized-Labs/oath"
-  url "https://github.com/Generalized-Labs/oath/archive/refs/tags/v0.2.4.tar.gz"
-  sha256 "49e687698000e4e7ec9d66b25432b28437a31c580eba52d828186b43733785a1"
+  url "https://github.com/Generalized-Labs/oath/archive/refs/tags/v0.2.5.tar.gz"
+  sha256 "20b5ba7926970d56b2dc1fe1d26ae2842187f231e48cd694f0f3887b47a11416"
   license "Apache-2.0"
   head "https://github.com/Generalized-Labs/oath.git", branch: "master"
 
