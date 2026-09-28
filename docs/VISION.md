@@ -50,7 +50,7 @@ needs the whole stack (publishing integrations, registry, CDN, verification plat
 CLIs) — expensive before, tractable now. Socket already AI-audits releases and catches
 exploits before npm does; there's enormous room to build better on top of / instead of npm.
 
-## Where Oath stands today (v0.2.4 developer preview)
+## Where Oath stands today (v0.2.5 developer preview)
 
 The install/exec side is implemented for the documented npm 11 workflow slices:
 integrity-verified fetches, transactional linking, block-by-default dependency
@@ -63,7 +63,7 @@ staging, private-package roles, short-lived identity tokens, replicated object
 storage, signed revocation tombstones, dist-tag rollback, metrics, billing-event
 verification, and transparency checkpoints.
 
-That does not make Oath GA. Exact-master run 29403483148 passed 100 reviewed
+That does not make Oath GA. Exact-master run 29499711576 passed 100 reviewed
 workflow IDs on Linux, macOS, and Windows, 250 pinned project trees, 10,000
 generated stress comparisons balanced across five execution modes, and native
 capability tests. Those are compatibility and containment-harness results, not
@@ -71,5 +71,5 @@ detection or production-service proof. The complete detection targets,
 performance targets, platform code signing, public registry/CDN operations,
 anti-squatting governance, external security review, reliability SLOs, and
 commercial adoption gates in [RELEASE_COMPLETE_PLAN.md](RELEASE_COMPLETE_PLAN.md)
-remain open. `v0.2.4` must be described as a developer preview or private beta,
+remain open. `v0.2.5` must be described as a developer preview or private beta,
 not a production-wide npm replacement.

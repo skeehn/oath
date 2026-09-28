@@ -36,7 +36,7 @@ requireMatch(
 requireMatch(formula, /^  license "Apache-2\.0"$/m, "Homebrew formula");
 requireMatch(
   formula,
-  /^  url "https:\/\/github\.com\/Generalized-Labs\/oath\/archive\/refs\/tags\/v0\.2\.4\.tar\.gz"$/m,
+  /^  url "https:\/\/github\.com\/Generalized-Labs\/oath\/archive\/refs\/tags\/v0\.2\.5\.tar\.gz"$/m,
   "Homebrew formula release URL",
 );
 if (!cliMain.includes('"license": "UNLICENSED"')) {

@@ -1,6 +1,6 @@
 # Registry deployment and operations
 
-The Oath registry in `v0.2.4` is a business-beta control plane. It is suitable
+The Oath registry in `v0.2.5` is a business-beta control plane. It is suitable
 for isolated design-partner deployments with an operator and explicit recovery
 procedures. It is not yet a general-availability public registry.
 

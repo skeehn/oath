@@ -31,11 +31,11 @@ The installer selects the correct macOS/Linux asset, downloads its `.sha256`
 sidecar, verifies the binary, and fails closed when the checksum is missing or
 wrong.
 
-To install the exact `v0.2.4` developer preview instead of the latest stable
+To install the exact `v0.2.5` developer preview instead of the latest stable
 release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Generalized-Labs/oath/master/install.sh | OATH_VERSION=v0.2.4 sh
+curl -fsSL https://raw.githubusercontent.com/Generalized-Labs/oath/master/install.sh | OATH_VERSION=v0.2.5 sh
 ```
 
 ### 2. Create and verify a small project
@@ -71,10 +71,10 @@ procedure live in [`contracts/`](contracts/README.md).
 window. JSON modes reserve stdout for one parseable document.
 
 > [!IMPORTANT]
-> The installer follows the latest non-prerelease GitHub release. The `v0.2.4`
+> The installer follows the latest non-prerelease GitHub release. The `v0.2.5`
 > line is a developer preview that adds staged publishing, signed transfers,
 > the PostgreSQL registry control plane, portable deployment, signed agent
-> contracts, expanded evidence, native capability reporting, and Windows assets.
+> contracts, expanded evidence, and native Linux, macOS, and Windows containment.
 > Preview users can download its release
 > assets, use the pinned installer command above, or build `master` from source;
 > `v0.1.7` remains the stable binary. The
@@ -83,8 +83,8 @@ window. JSON modes reserve stdout for one parseable document.
 
 ## Release status
 
-`v0.2.4` is a developer preview, not a general-availability
-claim. The tested CLI workflow slices and native Linux/Windows boundaries have
+`v0.2.5` is a developer preview, not a general-availability
+claim. The tested CLI workflow slices and native Linux/macOS/Windows boundaries have
 public evidence. The hosted registry remains a business-beta control plane, and
 the broader GA gates for detection quality, performance, signed platform
 binaries, service reliability, independent review, and design-partner adoption
@@ -136,11 +136,11 @@ a new decision.
 | Generated stress executions | 10,000 / 10,000 | Deterministic comparisons, 2,000 each across clean, warm, offline, repeat, and interrupted modes; **not** 10,000 independent npm behaviors |
 | Pinned real-project trees | 250 / 250 | Exact npm/Oath dependency-tree equivalents for the eligible locked corpus |
 | Independently reviewed workflows | 300 / 300 platform results | 100 workflow IDs matched npm 11.12.1 on Linux, macOS, and Windows |
-| Native capability reports | 4 / 4 | Ubuntu 24 strict enforcement, Ubuntu 22 fail-closed behavior, and Windows Server 2022/2025 containment |
+| Native capability reports | 5 / 5 | Ubuntu 24 strict enforcement, Ubuntu 22 fail-closed behavior, macOS 15 Seatbelt containment, and Windows Server 2022/2025 containment |
 
 These results come from exact-master CI run
-[29403483148](https://github.com/Generalized-Labs/oath/actions/runs/29403483148)
-at commit `49f98e650ae3b5066463e585a8843189eb00ccfc`; all 60 jobs and the
+[29499711576](https://github.com/Generalized-Labs/oath/actions/runs/29499711576)
+at commit `803f7883f8a663a5da56ab82a45c88d72ab9eee3`; all 61 jobs and the
 `release-evidence-gate` passed. A release tag still requires the same full gate
 to pass on the exact tagged commit.
 
@@ -150,7 +150,7 @@ speed claim: Oath was slower than npm and Bun on both cold and warm runs.
 
 - [Live evidence website](https://generalized-labs.github.io/oath/)
 - [Compatibility and security methodology](docs/GA_EVIDENCE.md)
-- [v0.2.4 release-readiness report](docs/RELEASE_READINESS.md)
+- [v0.2.5 release-readiness report](docs/RELEASE_READINESS.md)
 - [npm workflow contract](docs/NPM_COMPATIBILITY_CONTRACT.md)
 - [Scanner threat model and limitations](docs/scanner-threat-model.md)
 - [Registry deployment and operations](docs/REGISTRY_OPERATIONS.md)
@@ -178,8 +178,9 @@ installation directory:
 curl -fsSL https://raw.githubusercontent.com/Generalized-Labs/oath/master/install.sh | OATH_INSTALL="$HOME/bin" sh
 ```
 
-The checked-in formula targets `v0.1.7`; the separately published tap may update
-on a different schedule. Check its version before using it:
+The checked-in formula targets the immutable `v0.2.5` developer-preview source;
+the separately published tap may update on a different schedule. Check its
+version before using it:
 
 ```sh
 brew info generalized-labs/tap/oath
@@ -212,7 +213,7 @@ cargo build --release --locked --bin oath
 .\target\release\oath.exe --version
 ```
 
-Windows Server 2022 and 2025 native-containment checks pass in CI. The `v0.2.4`
+Windows Server 2022 and 2025 native-containment checks pass in CI. The `v0.2.5`
 developer-preview release includes x86-64 and ARM64 Windows binaries. Do not use
 the Unix installer on Windows.
 
@@ -239,7 +240,7 @@ oath log                           # inspect the local transparency log
 oath score lodash                  # inspect package evidence
 ```
 
-These commands are available in the `v0.2.4` developer preview and on `master`:
+These commands are available in the `v0.2.5` developer preview and on `master`:
 
 ```sh
 oath sandbox-info --json

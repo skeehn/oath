@@ -23,9 +23,9 @@ BINARY="oath-${PLATFORM}-${ARCH}"
 if [ -n "${OATH_VERSION:-}" ]; then
   LATEST=$OATH_VERSION
   case "$LATEST" in
-    *[!v0-9.]*|*.*.*.*) echo "oath: OATH_VERSION must be a release tag such as v0.2.4" >&2; exit 1 ;;
+    *[!v0-9.]*|*.*.*.*) echo "oath: OATH_VERSION must be a release tag such as v0.2.5" >&2; exit 1 ;;
     v[0-9]*.[0-9]*.[0-9]*) ;;
-    *) echo "oath: OATH_VERSION must be a release tag such as v0.2.4" >&2; exit 1 ;;
+    *) echo "oath: OATH_VERSION must be a release tag such as v0.2.5" >&2; exit 1 ;;
   esac
 else
   if ! LATEST_URL=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest"); then
