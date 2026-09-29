@@ -91,7 +91,7 @@ jobs:
           sha256sum oath-agent-contracts.tar.gz > oath-agent-contracts.tar.gz.sha256
       - name: Attest agent contract bundle
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
             oath-agent-contracts.tar.gz
@@ -145,7 +145,7 @@ jobs:
           sha256sum oath-audit-inputs.tar.gz > oath-audit-inputs.tar.gz.sha256
       - name: Attest audit input bundle
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
             oath-audit-inputs.tar.gz
@@ -571,7 +571,7 @@ jobs:
       - run: sha256sum sandbox-capabilities-linux.json > sandbox-capabilities-linux.sha256
       - name: Sign capability report with GitHub artifact attestation
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: sandbox-capabilities-linux.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -607,7 +607,7 @@ jobs:
         run: Get-FileHash sandbox-capabilities-windows.json -Algorithm SHA256 | Format-List | Out-File sandbox-capabilities-windows.sha256
       - name: Sign capability report with GitHub artifact attestation
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: sandbox-capabilities-windows.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -636,7 +636,7 @@ jobs:
       - run: shasum -a 256 sandbox-capabilities-macos.json > sandbox-capabilities-macos.sha256
       - name: Sign capability report with GitHub artifact attestation
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: sandbox-capabilities-macos.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -776,7 +776,7 @@ jobs:
           path: evidence-download/contracts
       - run: node scripts/generate-ga-evidence.mjs evidence-download ga-evidence-manifest.json
       - run: sha256sum ga-evidence-manifest.json > ga-evidence-manifest.json.sha256
-      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: ga-evidence-manifest.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
