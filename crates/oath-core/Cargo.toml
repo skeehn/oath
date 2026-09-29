@@ -11,4 +11,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 blake3.workspace = true
-toml = "0.8"
+toml = "1.1"
