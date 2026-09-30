@@ -218,7 +218,7 @@ impl ArboristPlanner {
     }
 
     pub fn plan_with(project: &Path, request: &PlacementRequest) -> Result<PlacementPlan> {
-        let runtime = BundledRuntime::extract()?;
+        let runtime = BundledRuntime::cached()?;
         let script = tempfile::NamedTempFile::new().context("create Arborist planner script")?;
         std::fs::write(script.path(), PLANNER)?;
         let project_argument = node_process_path(project);
@@ -251,7 +251,7 @@ impl ArboristPlanner {
     /// Evaluate npm's complete dependency-selector language against Oath's
     /// materialized tree using the integrity-pinned Arborist runtime.
     pub fn query(project: &Path, selector: &str) -> Result<serde_json::Value> {
-        let runtime = BundledRuntime::extract()?;
+        let runtime = BundledRuntime::cached()?;
         let script = tempfile::NamedTempFile::new().context("create Arborist query script")?;
         std::fs::write(script.path(), QUERY)?;
         let output = std::process::Command::new("node")
@@ -287,7 +287,7 @@ async function main () {
 main().catch(error => { console.error(error.stack || error.message); process.exitCode = 1 })
 "#;
 
-    let runtime = BundledRuntime::extract()?;
+    let runtime = BundledRuntime::cached()?;
     let script = tempfile::NamedTempFile::new().context("create npm packlist script")?;
     std::fs::write(script.path(), SCRIPT)?;
     let root_argument = node_process_path(root);
@@ -350,7 +350,7 @@ struct BundledRuntime {
 /// Return the pinned npm CLI entrypoint used by Oath's compatibility adapters.
 /// The runtime is content-addressed and integrity-verified before this path is returned.
 pub fn pinned_npm_cli_path() -> Result<std::path::PathBuf> {
-    let runtime = BundledRuntime::extract()?;
+    let runtime = BundledRuntime::cached()?;
     let path = runtime.package_root.join("bin").join("npm-cli.js");
     anyhow::ensure!(path.is_file(), "pinned npm CLI entrypoint is missing");
     Ok(path)
@@ -359,7 +359,7 @@ pub fn pinned_npm_cli_path() -> Result<std::path::PathBuf> {
 /// Return integrity-verified npm library entrypoints used for Sigstore
 /// provenance generation and npm package-URL normalization.
 pub fn pinned_npm_provenance_paths() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
-    let runtime = BundledRuntime::extract()?;
+    let runtime = BundledRuntime::cached()?;
     let provenance = runtime
         .package_root
         .join("node_modules/libnpmpublish/lib/provenance.js");
@@ -375,6 +375,20 @@ pub fn pinned_npm_provenance_paths() -> Result<(std::path::PathBuf, std::path::P
     Ok((provenance, package_arg))
 }
 
+/// Probe once per process whether a usable `node` is on PATH. Windows binary
+/// linking shells out to node per binary, so fail fast with a clear message
+/// instead of a cryptic per-binary spawn error.
+#[cfg(windows)]
+fn node_available() -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
 /// Create npm-compatible package executable links. Windows requires cmd-shim
 /// wrappers rather than privileged file symlinks.
 pub fn link_package_binary(from: &Path, to: &Path) -> Result<()> {
@@ -385,7 +399,11 @@ pub fn link_package_binary(from: &Path, to: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        let runtime = BundledRuntime::extract()?;
+        anyhow::ensure!(
+            node_available(),
+            "node is required on PATH to create Windows command shims"
+        );
+        let runtime = BundledRuntime::cached()?;
         let cmd_shim = runtime.package_root.join("node_modules/cmd-shim");
         anyhow::ensure!(cmd_shim.is_dir(), "pinned npm cmd-shim module is missing");
         let source = if from.is_absolute() {
@@ -413,6 +431,18 @@ pub fn link_package_binary(from: &Path, to: &Path) -> Result<()> {
 }
 
 impl BundledRuntime {
+    /// Process-cached extraction. The bundled runtime is content-addressed and
+    /// immutable, so hashing and verifying it once per process is sufficient;
+    /// callers must not re-extract per package or per binary.
+    fn cached() -> Result<&'static Self> {
+        static CACHED: std::sync::OnceLock<Result<BundledRuntime, String>> =
+            std::sync::OnceLock::new();
+        let cached = CACHED.get_or_init(|| Self::extract().map_err(|error| format!("{error:#}")));
+        cached
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("bundled npm runtime: {error}"))
+    }
+
     fn extract() -> Result<Self> {
         let digest = Sha256::digest(NPM_RUNTIME);
         let actual = digest

@@ -502,13 +502,6 @@ async function runBaseCase(command) {
         const oathInteractive = ptySupported
           ? runPty(oath, ["init"], promptResponses, twin.oathDir, twin.oathHome)
           : run(oath, ["init", "--yes"], twin.oathDir, twin.oathHome);
-        if (!ptySupported && npmInteractive.status === 0 && oathInteractive.status === 0) {
-          for (const project of [twin.npmDir, twin.oathDir]) {
-            const manifest = await readJson(join(project, "package.json"));
-            manifest.name = "init-fixture";
-            await writeJson(join(project, "package.json"), manifest);
-          }
-        }
         npmResult = sequenceResult([npmYes, npmInteractive]);
         oathResult = sequenceResult([oathYes, oathInteractive]);
         const initContract = async project => {
@@ -527,8 +520,25 @@ async function runBaseCase(command) {
         };
         npmExtra.created = await exists(join(twin.npmDir, "package.json"));
         oathExtra.created = await exists(join(twin.oathDir, "package.json"));
-        npmExtra.interactive = await initContract(twin.npmDir);
-        oathExtra.interactive = await initContract(twin.oathDir);
+        if (ptySupported) {
+          npmExtra.interactive = await initContract(twin.npmDir);
+          oathExtra.interactive = await initContract(twin.oathDir);
+        } else {
+          // No PTY on Windows: both sides ran `init --yes`, whose defaults
+          // legitimately differ between npm and oath. Compare only that a
+          // valid manifest was created, not the tool-specific defaults.
+          const initCreated = async (project) => {
+            if (!await exists(join(project, "package.json"))) return { created: false };
+            try {
+              await readJson(join(project, "package.json"));
+              return { created: true };
+            } catch {
+              return { created: false };
+            }
+          };
+          npmExtra.interactive = await initCreated(twin.npmDir);
+          oathExtra.interactive = await initCreated(twin.oathDir);
+        }
         npmExtra.interactive_pty_exercised = ptySupported;
         oathExtra.interactive_pty_exercised = ptySupported;
         break;
@@ -920,7 +930,7 @@ async function runBaseCase(command) {
         await chmod(browserProbe, 0o755);
         const npmCapture = join(root, "npm-browser.log");
         const oathCapture = join(root, "oath-browser.log");
-        const npmBrowser = run(npmCommand, ["fund", "chalk", "--which=1", "--browser", browserProbe], twin.npmDir, twin.npmHome, { env: { BROWSER_CAPTURE: npmCapture } });
+        const npmBrowser = run(npmCommand, ["fund", "chalk", "--which=1", "--browser", browserProbe], twin.npmDir, twin.npmHome, { env: { BROWSER_CAPTURE: npmCapture, BROWSER: browserProbe } });
         const oathBrowser = run(oath, ["fund", "chalk", "--which=1", "--browser", browserProbe], twin.oathDir, twin.oathHome, { env: { BROWSER_CAPTURE: oathCapture } });
         npmResult = sequenceResult([npmJson, npmBrowser]);
         oathResult = sequenceResult([oathJson, oathBrowser]);

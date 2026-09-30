@@ -122,3 +122,63 @@ test("PerformanceEvidence v2 requires warm no-op and phase regression evidence",
   });
   assert.deepEqual(errors, []);
 });
+
+test("phase_regression gate requires a baseline or an explicit waiver", async () => {
+  const { mkdtemp, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const withPhases = (phases) => ({
+    ...benchmarks(),
+    warm_noop: { tools: { npm: summary([100, 110, 120]), oath: summary([100, 120, 140]) } },
+    warm_install: {
+      tools: {
+        npm: summary([100, 110, 120]),
+        oath: {
+          ...summary([100, 120, 140]),
+          raw_samples: [{ status: 0, timed_out: false, phase_timings_ms: phases }],
+        },
+      },
+    },
+  });
+
+  // No baseline and no waiver -> insufficient, not a silent pass.
+  const gates = evaluateGates(withPhases({ resolve: 10 }), config(), { treeEquivalent: true, versionsComplete: true });
+  assert.equal(gates.phase_regression.status, "insufficient");
+  assert.ok(gates.phase_regression.reasons.some((reason) => reason.includes("baseline")));
+
+  // Explicit waiver -> pass with the waiver recorded.
+  const waived = evaluateGates(
+    withPhases({ resolve: 10 }),
+    config({ phaseWaiverReason: "first run, no accepted baseline yet" }),
+    { treeEquivalent: true, versionsComplete: true },
+  );
+  assert.equal(waived.phase_regression.status, "pass");
+  assert.ok(waived.phase_regression.requirement.waiver.includes("first run"));
+
+  // Baseline with no regression -> pass.
+  const dir = await mkdtemp(join(tmpdir(), "oath-phase-baseline-"));
+  const baselinePath = join(dir, "baseline.json");
+  await writeFile(baselinePath, JSON.stringify({
+    benchmarks: {
+      warm_install: {
+        tools: { oath: { raw_samples: [{ status: 0, timed_out: false, phase_timings_ms: { resolve: 100 } }] } },
+      },
+    },
+  }));
+  const passing = evaluateGates(
+    withPhases({ resolve: 105 }),
+    config({ phaseBaseline: baselinePath }),
+    { treeEquivalent: true, versionsComplete: true },
+  );
+  assert.equal(passing.phase_regression.status, "pass");
+
+  // Baseline with >10% regression -> fail.
+  const failing = evaluateGates(
+    withPhases({ resolve: 120 }),
+    config({ phaseBaseline: baselinePath }),
+    { treeEquivalent: true, versionsComplete: true },
+  );
+  assert.equal(failing.phase_regression.status, "fail");
+  assert.ok(failing.phase_regression.reasons.some((reason) => reason.includes("resolve")));
+});

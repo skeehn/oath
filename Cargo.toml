@@ -47,8 +47,10 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 hmac = "0.12"
 hex = "0.4"
 
-# HTTP -- rustls-tls (not native-tls/OpenSSL) so Linux cross-compiles need no system OpenSSL
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "gzip", "rustls-tls"] }
+# HTTP -- rustls-tls-native-roots (not native-tls/OpenSSL) so Linux cross-compiles
+# need no system OpenSSL, while still trusting the OS certificate store like
+# npm does (corporate proxies and private CAs).
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "gzip", "rustls-tls-native-roots"] }
 axum = { version = "0.8", features = ["macros"] }
 
 # CLI

@@ -1196,10 +1196,10 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -1777,10 +1777,9 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "flate2",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "glob",
  "hex",
- "getrandom 0.4.3",
  "node-semver",
  "oath-analyze",
  "oath-contracts",
@@ -2697,6 +2696,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -2713,7 +2713,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.8",
 ]
 
 [[package]]

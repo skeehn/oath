@@ -186,9 +186,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm install --global npm@11.12.1
-      - name: Install Linux sandbox linker dependency
+      - name: Install Linux sandbox runtime
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap libseccomp-dev
       - run: cargo build --locked --bin oath
       - name: Run independent npm behavior contract
         run: node scripts/compat-behavioral.mjs --execute

@@ -8,6 +8,12 @@ BEGIN
     END IF;
 END $$;
 
+-- NOTE: creating the roles is not enough. The database login user that the
+-- registry runs as must be a *member* of the role it sets via OATH_DATABASE_ROLE,
+-- otherwise `SET ROLE oath_api` fails at startup. As a superuser, run:
+--   GRANT oath_api TO <registry_login_user>;
+--   GRANT oath_worker TO <worker_login_user>;
+
 CREATE OR REPLACE FUNCTION oath_current_organization() RETURNS TEXT
 LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT NULLIF(current_setting('oath.organization', true), '')

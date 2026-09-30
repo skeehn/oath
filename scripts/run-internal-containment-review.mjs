@@ -2,12 +2,16 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 const outputIndex = process.argv.indexOf("--output");
 const output = resolve(outputIndex === -1 ? "internal-containment-review.json" : process.argv[outputIndex + 1]);
 const oath = resolve(process.env.OATH_BIN ?? "target/debug/oath");
-const target = process.env.CARGO_TARGET_DIR ?? "/private/tmp/oath-containment-review-target";
+// Portable scratch space: /private/tmp only exists on macOS, so derive from
+// the OS temp dir instead of hardcoding it.
+const scratch = process.env.OATH_CONTAINMENT_REVIEW_DIR ?? join(tmpdir(), "oath-containment-review");
+const target = process.env.CARGO_TARGET_DIR ?? join(scratch, "target");
 const commit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length > 0;
 
@@ -42,7 +46,7 @@ function execute(review) {
 
 const results = reviews.map(execute);
 let capabilities = null;
-const capabilityResult = spawnSync(oath, ["capabilities", "--json"], { encoding: "utf8", env: { ...process.env, OATH_HOME: "/private/tmp/oath-containment-review-home" } });
+const capabilityResult = spawnSync(oath, ["capabilities", "--json"], { encoding: "utf8", env: { ...process.env, OATH_HOME: process.env.OATH_CONTAINMENT_REVIEW_HOME ?? join(scratch, "home") } });
 try {
   capabilities = JSON.parse(capabilityResult.stdout);
 } catch {

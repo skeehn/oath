@@ -1485,6 +1485,10 @@ async fn main() -> Result<()> {
         } => {
             if let Some(initializer) = initializer {
                 let package = initializer_package_spec(&initializer)?;
+                println!(
+                    "oath: fetching initializer package {package} for assessment; \
+                     execution requires approval (use --yes to skip the prompt)"
+                );
                 cmd_exec_scoped(
                     Some(&package),
                     &[],
@@ -2403,7 +2407,7 @@ async fn cmd_install(
         }
         for spec in &packages {
             let (name, version) = parse_package_spec(spec);
-            pkg[dep_key][&name] = serde_json::Value::String(version);
+            pkg[dep_key][&name] = serde_json::Value::String(npm_save_spec(&version));
             added_package_names.push(name);
         }
         let name = pkg["name"].as_str().unwrap_or("project").to_string();
@@ -3929,8 +3933,18 @@ async fn cmd_add_scoped(
         selected_workspace_targets(&workspace)?
     } else {
         let root = std::env::current_dir()?;
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join("package.json"))?)?;
+        let manifest_path = root.join("package.json");
+        if !manifest_path.exists() {
+            println!("oath add: no package.json found, creating one");
+            std::fs::write(
+                &manifest_path,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": "project",
+                    "version": "1.0.0",
+                }))?,
+            )?;
+        }
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
         vec![WorkspaceTarget {
             name: manifest["name"].as_str().unwrap_or("package").to_owned(),
             path: root,
@@ -4812,10 +4826,9 @@ fn init_prompt(label: &str, default: &str) -> Result<String> {
 }
 
 fn cmd_init_one(yes: bool, scope: Option<&str>, private: bool) -> Result<()> {
-    anyhow::ensure!(
-        !PathBuf::from("package.json").exists(),
-        "package.json already exists"
-    );
+    if PathBuf::from("package.json").exists() {
+        println!("oath init: package.json already exists, overwriting");
+    }
     if let Some(scope) = scope {
         validate_scope(scope)?;
     }
@@ -4954,7 +4967,8 @@ fn cmd_init_scoped(
 fn cmd_why(package: &str, json_output: bool) -> Result<()> {
     let lock_path = PathBuf::from("oath-lock.json");
     if !lock_path.exists() {
-        anyhow::bail!("no oath-lock.json found (run `oath install` first)");
+        println!("oath why: no oath-lock.json found (run `oath install` first)");
+        return Ok(());
     }
     let content = std::fs::read_to_string(&lock_path)?;
     let lock: serde_json::Value = serde_json::from_str(&content)?;
@@ -4962,7 +4976,8 @@ fn cmd_why(package: &str, json_output: bool) -> Result<()> {
     let packages = match lock.get("packages").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            anyhow::bail!("oath-lock.json has no packages");
+            println!("oath why: oath-lock.json has no packages");
+            return Ok(());
         }
     };
 
@@ -6309,12 +6324,28 @@ fn run_contained_lifecycle(
     #[cfg(target_os = "windows")]
     let (program, args) = {
         let escaped = command.replace('%', "%%");
+        let mut prefix = String::new();
+        for (name, value) in environment {
+            if name.chars().enumerate().all(|(index, character)| {
+                character == '_'
+                    || character.is_ascii_alphanumeric()
+                        && (index > 0 || !character.is_ascii_digit())
+            }) {
+                let quoted = value.replace('"', "\"\"");
+                prefix.push_str(&format!("set \"{name}={quoted}\" && "));
+            }
+        }
         (
             std::path::PathBuf::from(
                 std::env::var("ComSpec")
                     .unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into()),
             ),
-            vec!["/D".into(), "/S".into(), "/C".into(), escaped],
+            vec![
+                "/D".into(),
+                "/S".into(),
+                "/C".into(),
+                format!("{prefix}{escaped}"),
+            ],
         )
     };
 
@@ -7592,6 +7623,61 @@ fn view_field_values(
         .collect()
 }
 
+async fn print_info_report(pkg_name: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("oath/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let meta = oath_fetch::fetch_package_metadata(&client, pkg_name).await?;
+
+    println!();
+    println!("  {}@{}", meta.name, meta.latest_version);
+    println!();
+
+    println!("  maintainers:");
+    for m in &meta.maintainers {
+        if let Some(email) = &m.email {
+            println!("    {} <{}>", m.name, email);
+        } else {
+            println!("    {}", m.name);
+        }
+    }
+    println!();
+
+    if let Some(downloads) = meta.weekly_downloads {
+        println!("  weekly downloads: {}", format_downloads(downloads));
+    }
+    println!("  total versions:   {}", meta.total_versions);
+    if let Some(ref published) = meta.published_at {
+        println!("  latest published: {published}");
+    }
+    if let Some(age) = meta.last_publish_age_days {
+        println!("  publish age:      {age} days ago");
+    }
+    println!();
+
+    if let Some(ref license) = meta.license {
+        println!("  license:    {license}");
+    }
+    if let Some(ref repo) = meta.repository {
+        println!("  repository: {repo}");
+    }
+    println!(
+        "  has readme: {}",
+        if meta.has_readme { "yes" } else { "no" }
+    );
+    Ok(())
+}
+
+fn format_downloads(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 async fn cmd_view(package: Option<&str>, fields: &[String], json_output: bool) -> Result<()> {
     let package = current_or_requested_package(package.map(String::from))?;
     let (name, requested) = parse_package_spec(&package);
@@ -7635,7 +7721,7 @@ async fn cmd_view(package: Option<&str>, fields: &[String], json_output: bool) -
         return Ok(());
     }
     if values.is_empty() {
-        println!("{}", serde_json::to_string_pretty(&selected)?);
+        print_info_report(&name).await?;
         return Ok(());
     }
     for (field, value) in values {

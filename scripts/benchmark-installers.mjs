@@ -92,6 +92,7 @@ export function parseConfiguration(argv = process.argv.slice(2)) {
     execP95LimitMs: number(option(argv, "--exec-p95-limit-ms", "OATH_BENCHMARK_EXEC_P95_LIMIT_MS"), "exec p95 limit", DEFAULTS.execP95LimitMs),
     packageSpec: option(argv, "--package", "OATH_BENCHMARK_PACKAGE", DEFAULTS.packageSpec),
     phaseWaiverReason: option(argv, "--phase-waiver-reason", "OATH_PHASE_WAIVER_REASON", null),
+    phaseBaseline: option(argv, "--phase-baseline", "OATH_PHASE_BASELINE", null),
   };
 }
 
@@ -119,6 +120,99 @@ export function summarizeSamples(samples) {
 
 function insufficient(name, reasons, observed, requirement) {
   return { name, status: "insufficient", observed, requirement, reasons };
+}
+
+/// Per-phase p95 timings from raw benchmark samples that recorded Oath phase
+/// timings. Returns a map of phase name -> p95 milliseconds.
+function phaseP95ByPhase(rawSamples) {
+  const byPhase = new Map();
+  for (const sample of rawSamples ?? []) {
+    if (sample.status !== 0 || sample.timed_out) continue;
+    const phases = sample.phase_timings_ms;
+    if (!phases || typeof phases !== "object") continue;
+    for (const [phase, ms] of Object.entries(phases)) {
+      if (typeof ms !== "number" || !Number.isFinite(ms)) continue;
+      if (!byPhase.has(phase)) byPhase.set(phase, []);
+      byPhase.get(phase).push(ms);
+    }
+  }
+  const result = {};
+  for (const [phase, values] of byPhase) {
+    result[phase] = percentile(values, 0.95);
+  }
+  return result;
+}
+
+/// Real phase-regression gate: compare current per-phase p95 timings against
+/// an accepted baseline PerformanceEvidence document. Passes when no phase
+/// regresses by more than 10%. An explicit waiver still passes with the waiver
+/// recorded; with neither a baseline nor a waiver the gate is insufficient
+/// rather than silently passing.
+function phaseRegressionGate(benchmarks, config) {
+  const name = "phase_regression";
+  const requirement = {
+    metric: "maximum warm_install per-phase oath p95 regression vs accepted baseline",
+    maximum: 1.1,
+  };
+  if (config.phaseWaiverReason) {
+    return {
+      name,
+      status: "pass",
+      observed: null,
+      requirement: { ...requirement, waiver: config.phaseWaiverReason },
+      reasons: [`explicit waiver: ${config.phaseWaiverReason}`],
+    };
+  }
+  if (!config.phaseBaseline) {
+    return insufficient(
+      name,
+      ["no accepted phase baseline was supplied (use --phase-baseline <evidence.json>)"],
+      null,
+      requirement,
+    );
+  }
+  let baseline;
+  try {
+    baseline = JSON.parse(readFileSync(config.phaseBaseline, "utf8"));
+  } catch (error) {
+    return insufficient(name, [`cannot read phase baseline: ${error.message}`], null, requirement);
+  }
+  const baselineP95 = phaseP95ByPhase(baseline?.benchmarks?.warm_install?.tools?.oath?.raw_samples);
+  const currentP95 = phaseP95ByPhase(benchmarks?.warm_install?.tools?.oath?.raw_samples);
+  const phases = Object.keys(baselineP95).filter(
+    (phase) => baselineP95[phase] > 0 && typeof currentP95[phase] === "number",
+  );
+  if (phases.length === 0) {
+    return insufficient(
+      name,
+      ["baseline or current run has no usable per-phase timings"],
+      null,
+      requirement,
+    );
+  }
+  let worst = 0;
+  let worstPhase = "";
+  const regressions = [];
+  for (const phase of phases) {
+    const ratio = currentP95[phase] / baselineP95[phase];
+    if (ratio > worst) {
+      worst = ratio;
+      worstPhase = phase;
+    }
+    if (ratio > requirement.maximum) regressions.push(`${phase}: ${ratio.toFixed(3)}x`);
+  }
+  return {
+    name,
+    status: worst <= requirement.maximum ? "pass" : "fail",
+    observed: worst,
+    requirement: { ...requirement, baseline: config.phaseBaseline, phases: phases.length },
+    reasons:
+      worst <= requirement.maximum
+        ? []
+        : [
+            `phase regressions exceed 10% over ${phases.length} phases: ${regressions.join(", ")} (worst: ${worstPhase} ${worst.toFixed(3)}x)`,
+          ],
+  };
 }
 
 function ratioGate(name, oathSummary, npmSummary, minimum, limit) {
@@ -163,9 +257,7 @@ export function evaluateGates(benchmarks, config, integrity = {}) {
   };
   if (benchmarks.warm_noop) {
     gates.warm_noop = ratioGate("warm_noop", benchmarks.warm_noop.tools.oath, benchmarks.warm_noop.tools.npm, config.minimumInstallSamples, config.warmNoopRatioLimit);
-    gates.phase_regression = integrity.phaseRegression === true
-      ? { name: "phase_regression", status: "pass", observed: integrity.maximumPhaseRegression ?? null, requirement: { metric: "maximum phase p95 regression", maximum: 0.1, waiver: integrity.phaseWaiverReason ?? null }, reasons: integrity.phaseWaiverReason ? [`explicit waiver: ${integrity.phaseWaiverReason}`] : [] }
-      : insufficient("phase_regression", ["no accepted phase baseline was supplied"], null, { metric: "maximum phase p95 regression", maximum: 0.1 });
+    gates.phase_regression = phaseRegressionGate(benchmarks, config);
   }
   if (integrity.treeEquivalent === false) {
     for (const key of ["cold_install", "warm_install"]) {
@@ -411,7 +503,7 @@ async function main() {
     const npmTrees = new Set([...cold.npm.raw_samples, ...warm.npm.raw_samples].filter((sample) => sample.status === 0).map((sample) => sample.tree.sha256));
     const oathTrees = new Set([...cold.oath.raw_samples, ...warm.oath.raw_samples].filter((sample) => sample.status === 0).map((sample) => sample.tree.sha256));
     const integrity = { tree_equivalent: npmTrees.size === 1 && oathTrees.size === 1 && [...npmTrees][0] === [...oathTrees][0], npm_tree_digests: [...npmTrees], oath_tree_digests: [...oathTrees], input_lock_sha256: fileSha256(join(seed, "package-lock.json")) };
-    const gates = evaluateGates(benchmarks, config, { treeEquivalent: integrity.tree_equivalent, versionsComplete: Boolean(tools.npm.version && tools.oath.version), phaseRegression: Boolean(config.phaseWaiverReason), phaseWaiverReason: config.phaseWaiverReason });
+    const gates = evaluateGates(benchmarks, config, { treeEquivalent: integrity.tree_equivalent, versionsComplete: Boolean(tools.npm.version && tools.oath.version) });
     const evidence = {
       schema_version: 2,
       evidence_type: "PerformanceEvidence",
@@ -426,6 +518,7 @@ async function main() {
         package_spec: config.packageSpec,
         dependency_manifest: DEFAULT_MANIFEST.dependencies,
         phase_regression_waiver: config.phaseWaiverReason,
+        phase_regression_baseline: config.phaseBaseline,
       },
       methodology: {
         percentile: "nearest-rank over successful samples; rank = ceil(q * n)",

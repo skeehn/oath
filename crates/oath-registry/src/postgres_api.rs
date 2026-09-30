@@ -2455,6 +2455,18 @@ mod tests {
             .unwrap();
         assert!(query("INSERT INTO packages(name,organization,private,created_at) VALUES ('cross-tenant-write','acme',true,0)")
             .execute(&mut *rls_write).await.is_err());
+        // The expected RLS violation above aborted this transaction; start a
+        // fresh one for the remaining cross-tenant checks.
+        rls_write.rollback().await.unwrap();
+        let mut rls_write = registry_assertions.control.pool().begin().await.unwrap();
+        query("SET LOCAL ROLE oath_api")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        query("SELECT set_config('oath.organization','rival',true)")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
         let public_delete = query("DELETE FROM packages WHERE name='public-tool'")
             .execute(&mut *rls_write)
             .await

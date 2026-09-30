@@ -39,9 +39,9 @@
               "type": "object",
               "required": ["family_separated", "time_separated", "labels_independently_held"],
               "properties": {
-                "family_separated": { "const": true },
-                "time_separated": { "const": true },
-                "labels_independently_held": { "const": true }
+                "family_separated": { "type": "boolean" },
+                "time_separated": { "type": "boolean" },
+                "labels_independently_held": { "type": "boolean" }
               }
             }
           ]

@@ -86,7 +86,16 @@ impl PostgresControlPlane {
                     if let Some(role) = role {
                         query(&format!("SET ROLE {role}"))
                             .execute(connection)
-                            .await?;
+                            .await
+                            .map_err(|error| {
+                                sqlx_core::Error::Protocol(
+                                    format!(
+                                        "SET ROLE {role} failed ({error:#}): the database login user must be a \
+                                         member of the role (as superuser: GRANT {role} TO <login_user>;)"
+                                    )
+                                    .into(),
+                                )
+                            })?;
                     }
                     Ok(())
                 })
@@ -675,6 +684,12 @@ impl PostgresControlPlane {
             role: row.get("role"),
             expires_at: row.get("expires_at"),
         };
+        // Lock the invitation row so concurrent accepts serialize; the guarded
+        // UPDATE below then guarantees exactly one winner.
+        query("SELECT 1 FROM invitations WHERE token_hash=$1 FOR UPDATE")
+            .bind(token_hash)
+            .fetch_optional(&mut *tx)
+            .await?;
         set_tenant(&mut tx, &invitation.organization).await?;
         if !invitation.email.eq_ignore_ascii_case(email) {
             tx.rollback().await?;
@@ -682,11 +697,19 @@ impl PostgresControlPlane {
         }
         query("INSERT INTO organization_members(organization,subject,email,role,created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization,subject) DO UPDATE SET email=EXCLUDED.email,role=EXCLUDED.role")
             .bind(&invitation.organization).bind(subject).bind(email).bind(&invitation.role).bind(crate::now() as i64).execute(&mut *tx).await?;
-        query("UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1")
-            .bind(token_hash)
-            .bind(crate::now() as i64)
-            .execute(&mut *tx)
-            .await?;
+        let accepted = query(
+            "UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1 AND accepted_at IS NULL",
+        )
+        .bind(token_hash)
+        .bind(crate::now() as i64)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if !accepted {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         tx.commit().await?;
         Ok(Some(invitation))
     }

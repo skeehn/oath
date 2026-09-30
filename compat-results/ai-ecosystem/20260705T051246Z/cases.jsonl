@@ -1,4 +1,0 @@
-{"case":"core-ai-sdks","status":"pass","duration_seconds":5,"packages":"openai ai @ai-sdk/openai @ai-sdk/anthropic zod","log":"compat-results/ai-ecosystem/20260705T051246Z/logs/core-ai-sdks.log"}
-{"case":"convex-cli-sdk","status":"pass","duration_seconds":6,"packages":"convex","log":"compat-results/ai-ecosystem/20260705T051246Z/logs/convex-cli-sdk.log"}
-{"case":"agent-protocol","status":"pass","duration_seconds":7,"packages":"@modelcontextprotocol/sdk @langchain/core","log":"compat-results/ai-ecosystem/20260705T051246Z/logs/agent-protocol.log"}
-{"case":"ts-agent-tooling","status":"pass","duration_seconds":3,"packages":"typescript tsx @types/node","log":"compat-results/ai-ecosystem/20260705T051246Z/logs/ts-agent-tooling.log"}
