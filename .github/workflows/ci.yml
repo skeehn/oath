@@ -377,6 +377,10 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+        env:
+          # Windows' 1MB default thread stack overflows when tests parse the
+          # large Cli struct; match Linux's 8MB default.
+          RUST_MIN_STACK: ${{ runner.os == 'Windows' && '8388608' || '' }}
 
       - name: Release build
         run: cargo build --release --locked --bin oath
