@@ -305,6 +305,67 @@ impl WorkspaceRoot {
         self.packages.iter().find(|p| p.name == name)
     }
 
+    /// Select workspaces using npm's name, exact directory, or parent-directory forms.
+    /// Results preserve declaration/glob order and never include the workspace root.
+    pub fn select_packages<'a>(
+        &'a self,
+        selectors: &[String],
+        all: bool,
+    ) -> Result<Vec<&'a WorkspacePackage>, String> {
+        if all && selectors.is_empty() {
+            return Ok(self.packages.iter().collect());
+        }
+        if selectors.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut selected = Vec::new();
+        for selector in selectors {
+            let selector_path = {
+                let candidate = PathBuf::from(selector);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    self.root.join(candidate)
+                }
+            };
+            let normalized = selector_path.canonicalize().unwrap_or(selector_path);
+            let mut matched = false;
+            for package in &self.packages {
+                let package_path = package
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| package.path.clone());
+                if package.name == *selector
+                    || package_path == normalized
+                    || package_path.starts_with(&normalized)
+                {
+                    matched = true;
+                    if !selected
+                        .iter()
+                        .any(|existing: &&WorkspacePackage| existing.path == package.path)
+                    {
+                        selected.push(package);
+                    }
+                }
+            }
+            if !matched {
+                return Err(format!("no workspace matched {selector}"));
+            }
+        }
+        if all {
+            for package in &self.packages {
+                if !selected
+                    .iter()
+                    .any(|existing| existing.path == package.path)
+                {
+                    selected.push(package);
+                }
+            }
+        }
+        Ok(selected)
+    }
+
     /// Collect all external (non-workspace) dependencies across all packages
     /// Returns a merged HashMap<name, spec> with workspace:* entries stripped out.
     /// Workspace deps are returned separately as a Vec<(consumer_name, dep_name)>.
@@ -312,6 +373,17 @@ impl WorkspaceRoot {
     pub fn collect_external_deps(
         &self,
         include_dev: bool,
+    ) -> (HashMap<String, String>, Vec<(String, String, String)>) {
+        self.collect_external_deps_for_packages(include_dev, true)
+    }
+
+    /// Collect dependencies for the packages in this `WorkspaceRoot`, optionally
+    /// including the root manifest. This is used by filtered npm workspace commands.
+    #[allow(clippy::type_complexity)]
+    pub fn collect_external_deps_for_packages(
+        &self,
+        include_dev: bool,
+        include_root: bool,
     ) -> (HashMap<String, String>, Vec<(String, String, String)>) {
         let pkg_map: HashMap<String, &WorkspacePackage> = self.package_map();
         let mut external: HashMap<String, String> = HashMap::new();
@@ -326,7 +398,7 @@ impl WorkspaceRoot {
         // We need to handle root manifest separately (owned value)
         let root_deps;
         let root_dev_deps;
-        if let Some(ref rm) = root_manifest {
+        if include_root && let Some(ref rm) = root_manifest {
             root_deps = rm.dependencies.clone();
             root_dev_deps = rm.dev_dependencies.clone();
             // Process root separately below
@@ -508,6 +580,41 @@ mod tests {
 
         let ws = detect_workspace_root(root).expect("should detect workspace");
         assert_eq!(ws.packages.len(), 2);
+    }
+
+    #[test]
+    fn workspace_selection_accepts_name_directory_and_parent() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"repo","private":true,"workspaces":["packages/*","apps/*"]}"#,
+        )
+        .unwrap();
+        write_pkg(&root.join("packages/core"), "@repo/core", "1.0.0", "");
+        write_pkg(&root.join("packages/ui"), "@repo/ui", "1.0.0", "");
+        write_pkg(&root.join("apps/web"), "web", "1.0.0", "");
+        let workspace = detect_workspace_root(root).unwrap();
+
+        let by_name = workspace
+            .select_packages(&["@repo/core".to_owned()], false)
+            .unwrap();
+        assert_eq!(by_name[0].name, "@repo/core");
+
+        let by_directory = workspace
+            .select_packages(&["apps/web".to_owned()], false)
+            .unwrap();
+        assert_eq!(by_directory[0].name, "web");
+
+        let by_parent = workspace
+            .select_packages(&["packages".to_owned()], false)
+            .unwrap();
+        assert_eq!(by_parent.len(), 2);
+        assert!(
+            workspace
+                .select_packages(&["missing".to_owned()], false)
+                .is_err()
+        );
     }
 
     #[test]

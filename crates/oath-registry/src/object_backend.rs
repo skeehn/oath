@@ -5,7 +5,94 @@ use object_store::{
     azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder, local::LocalFileSystem,
     path::Path as ObjectPath,
 };
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
+
+#[derive(Debug)]
+pub enum ArtifactReadError {
+    InvalidDigest(String),
+    NotFound(String),
+    Corrupt {
+        location: String,
+        expected: String,
+        actual: String,
+    },
+    Store {
+        location: String,
+        source: object_store::Error,
+    },
+    Repair(String),
+}
+
+impl std::fmt::Display for ArtifactReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDigest(digest) => {
+                write!(formatter, "invalid SHA-256 artifact digest {digest}")
+            }
+            Self::NotFound(digest) => write!(
+                formatter,
+                "artifact {digest} was not found in primary or replica stores"
+            ),
+            Self::Corrupt {
+                location,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "artifact corruption in {location}: expected SHA-256 {expected}, got {actual}"
+            ),
+            Self::Store { location, source } => {
+                write!(formatter, "artifact read from {location} failed: {source}")
+            }
+            Self::Repair(source) => {
+                write!(formatter, "primary artifact read-repair failed: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ArtifactReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_digest(digest: &str) -> std::result::Result<(), ArtifactReadError> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(ArtifactReadError::InvalidDigest(digest.to_owned()))
+    }
+}
+
+fn verify_bytes(
+    location: &str,
+    expected: &str,
+    bytes: &[u8],
+) -> std::result::Result<(), ArtifactReadError> {
+    let actual = sha256(bytes);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ArtifactReadError::Corrupt {
+            location: location.to_owned(),
+            expected: expected.to_owned(),
+            actual,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum ObjectBackendConfig {
@@ -45,7 +132,14 @@ impl ArtifactStore {
         Self { primary, replicas }
     }
 
-    async fn put_one(store: &Arc<dyn ObjectStore>, path: &ObjectPath, bytes: &[u8]) -> Result<()> {
+    async fn put_one(
+        store: &Arc<dyn ObjectStore>,
+        path: &ObjectPath,
+        digest: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        validate_digest(digest)?;
+        verify_bytes("write candidate", digest, bytes)?;
         let options = PutOptions {
             mode: PutMode::Create,
             ..Default::default()
@@ -54,6 +148,7 @@ impl ArtifactStore {
             Ok(_) => Ok(()),
             Err(object_store::Error::AlreadyExists { .. }) => {
                 let existing = store.get(path).await?.bytes().await?;
+                verify_bytes("existing immutable object", digest, &existing)?;
                 anyhow::ensure!(
                     existing.as_ref() == bytes,
                     "immutable object digest collision"
@@ -66,32 +161,57 @@ impl ArtifactStore {
 
     pub async fn put_immutable(&self, digest: &str, bytes: &[u8]) -> Result<()> {
         let path = ObjectPath::from(digest);
-        Self::put_one(&self.primary, &path, bytes).await?;
+        Self::put_one(&self.primary, &path, digest, bytes).await?;
         for replica in &self.replicas {
-            Self::put_one(replica, &path, bytes).await?;
+            Self::put_one(replica, &path, digest, bytes).await?;
         }
         Ok(())
     }
 
-    pub async fn get(&self, digest: &str) -> Result<Vec<u8>> {
+    async fn read_one(
+        store: &Arc<dyn ObjectStore>,
+        path: &ObjectPath,
+        digest: &str,
+        location: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, ArtifactReadError> {
+        let result = match store.get(path).await {
+            Ok(result) => result,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(source) => {
+                return Err(ArtifactReadError::Store {
+                    location: location.to_owned(),
+                    source,
+                });
+            }
+        };
+        let bytes = result
+            .bytes()
+            .await
+            .map_err(|source| ArtifactReadError::Store {
+                location: location.to_owned(),
+                source,
+            })?
+            .to_vec();
+        verify_bytes(location, digest, &bytes)?;
+        Ok(Some(bytes))
+    }
+
+    pub async fn get(&self, digest: &str) -> std::result::Result<Vec<u8>, ArtifactReadError> {
+        validate_digest(digest)?;
         let path = ObjectPath::from(digest);
-        match self.primary.get(&path).await {
-            Ok(result) => return Ok(result.bytes().await?.to_vec()),
-            Err(object_store::Error::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
+        if let Some(bytes) = Self::read_one(&self.primary, &path, digest, "primary").await? {
+            return Ok(bytes);
         }
-        for replica in &self.replicas {
-            match replica.get(&path).await {
-                Ok(result) => {
-                    let bytes = result.bytes().await?.to_vec();
-                    Self::put_one(&self.primary, &path, &bytes).await?;
-                    return Ok(bytes);
-                }
-                Err(object_store::Error::NotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
+        for (index, replica) in self.replicas.iter().enumerate() {
+            let location = format!("replica[{index}]");
+            if let Some(bytes) = Self::read_one(replica, &path, digest, &location).await? {
+                Self::put_one(&self.primary, &path, digest, &bytes)
+                    .await
+                    .map_err(|source| ArtifactReadError::Repair(source.to_string()))?;
+                return Ok(bytes);
             }
         }
-        anyhow::bail!("artifact {digest} was not found in primary or replica stores")
+        Err(ArtifactReadError::NotFound(digest.to_owned()))
     }
 
     pub async fn ready(&self) -> Result<()> {
@@ -189,6 +309,10 @@ pub fn artifact_store_from_env(default_root: PathBuf) -> Result<ArtifactStore> {
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
+
+    fn digest(bytes: &[u8]) -> String {
+        sha256(bytes)
+    }
     #[test]
     fn local_backend_builds_for_offline_tests() {
         let dir = tempfile::tempdir().unwrap();
@@ -205,8 +329,9 @@ mod tests {
         let primary: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let replica: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let store = ArtifactStore::with_replicas(primary.clone(), vec![replica.clone()]);
-        store.put_immutable("digest", b"artifact").await.unwrap();
-        let path = ObjectPath::from("digest");
+        let digest = digest(b"artifact");
+        store.put_immutable(&digest, b"artifact").await.unwrap();
+        let path = ObjectPath::from(digest);
         assert_eq!(
             primary
                 .get(&path)
@@ -235,13 +360,14 @@ mod tests {
     async fn reads_from_replica_and_repairs_primary() {
         let primary: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let replica: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = ObjectPath::from("digest");
+        let digest = digest(b"artifact");
+        let path = ObjectPath::from(digest.clone());
         replica
             .put(&path, b"artifact".to_vec().into())
             .await
             .unwrap();
         let store = ArtifactStore::with_replicas(primary.clone(), vec![replica]);
-        assert_eq!(store.get("digest").await.unwrap(), b"artifact");
+        assert_eq!(store.get(&digest).await.unwrap(), b"artifact");
         assert_eq!(
             primary
                 .get(&path)
@@ -253,5 +379,65 @@ mod tests {
                 .as_ref(),
             b"artifact"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_corrupt_primary_without_hiding_it_with_a_replica() {
+        let primary: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let replica: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let digest = digest(b"artifact");
+        let path = ObjectPath::from(digest.clone());
+        primary
+            .put(&path, b"corrupt".to_vec().into())
+            .await
+            .unwrap();
+        replica
+            .put(&path, b"artifact".to_vec().into())
+            .await
+            .unwrap();
+
+        let error = ArtifactStore::with_replicas(primary, vec![replica])
+            .get(&digest)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactReadError::Corrupt { ref location, .. } if location == "primary"
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_corrupt_replica_without_repairing_primary() {
+        let primary: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let replica: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let digest = digest(b"artifact");
+        let path = ObjectPath::from(digest.clone());
+        replica
+            .put(&path, b"corrupt".to_vec().into())
+            .await
+            .unwrap();
+
+        let error = ArtifactStore::with_replicas(primary.clone(), vec![replica])
+            .get(&digest)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactReadError::Corrupt { ref location, .. } if location == "replica[0]"
+        ));
+        assert!(matches!(
+            primary.get(&path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_put_when_bytes_do_not_match_digest() {
+        let store = ArtifactStore::new(Arc::new(InMemory::new()));
+        let error = store
+            .put_immutable(&digest(b"expected"), b"different")
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<ArtifactReadError>().is_some());
     }
 }

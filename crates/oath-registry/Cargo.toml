@@ -33,6 +33,8 @@ hmac.workspace = true
 hex.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
+async-trait.workspace = true
+redis.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 url.workspace = true
 flate2.workspace = true

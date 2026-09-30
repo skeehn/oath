@@ -70,6 +70,25 @@ impl Analyzer {
         let source_type = infer_source_type(&self.file_path);
         let result = Parser::new(&allocator, &self.source, source_type).parse();
 
+        if !result.diagnostics.is_empty() {
+            let diagnostic_count = result.diagnostics.len();
+            let first_diagnostic = result
+                .diagnostics
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unknown parser error".to_string());
+            self.findings.push(Finding {
+                kind: FindingKind::AnalysisIncomplete,
+                risk: RiskLevel::High,
+                message: format!(
+                    "JavaScript/TypeScript parser reported {diagnostic_count} error(s); analysis may be incomplete: {first_diagnostic}"
+                ),
+                file: self.file_path.clone(),
+                line: 0,
+                snippet: None,
+            });
+        }
+
         if result.program.body.is_empty() {
             return Ok(());
         }

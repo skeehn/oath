@@ -16,4 +16,5 @@ pub mod resolver;
 pub use graph::{DepGraph, DepNode};
 pub use import::import_npm_lockfile;
 pub use lockfile::{LOCKFILE_VERSION, Lockfile};
+pub use placement::pinned_npm_provenance_paths;
 pub use resolver::Resolver;

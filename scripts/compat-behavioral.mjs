@@ -49,6 +49,11 @@ if (execute) {
 const report = {
   schema_version: 1,
   evidence_class: "independent_behavioral",
+  generated_at: new Date().toISOString(),
+  release_commit: process.env.GITHUB_SHA ?? null,
+  platform: process.platform,
+  architecture: process.arch,
+  node_version: process.version,
   reference_npm: npmVersion,
   independent_behavior_target: contract.behaviors.length,
   executed: results.length,

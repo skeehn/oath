@@ -77,6 +77,8 @@ pub enum FindingKind {
     ModuleLoaderPatch,
     /// Native addon (.node binary / binding.gyp) -- bypasses JS sandbox entirely
     NativeAddon,
+    /// An executable input could not be analyzed completely; review is required
+    AnalysisIncomplete,
 }
 
 impl std::fmt::Display for FindingKind {
@@ -102,6 +104,7 @@ impl std::fmt::Display for FindingKind {
             Self::EnvPathOverwrite => write!(f, "env_path_overwrite"),
             Self::ModuleLoaderPatch => write!(f, "module_loader_patch"),
             Self::NativeAddon => write!(f, "native_addon"),
+            Self::AnalysisIncomplete => write!(f, "analysis_incomplete"),
         }
     }
 }

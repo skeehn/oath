@@ -2,5 +2,9 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - service-account.yaml
+  - migration-job.yaml
   - deployment.yaml
+  - analysis-worker.yaml
+  - outbox-worker.yaml
+  - maintenance-worker.yaml
   - service.yaml

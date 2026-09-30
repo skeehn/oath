@@ -14,7 +14,8 @@ export type OathReasonCode =
 
 export interface DetachedSignature {
   algorithm: "ed25519";
-  canonicalization: "oath-json-v1";
+  canonicalization: "oath-json-v1" | "oath-json-v1+oath-domain-sha256-v1";
+  domain?: string;
   public_key: string;
   signature: string;
 }

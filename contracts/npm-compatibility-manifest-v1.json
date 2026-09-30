@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "product": "oath-cli",
+  "compatibility_target": "npm/npx",
+  "ga_required_commands": [
+    "install",
+    "ci",
+    "add",
+    "remove",
+    "update",
+    "run",
+    "exec",
+    "pack",
+    "publish",
+    "view",
+    "ls",
+    "outdated",
+    "dedupe",
+    "link",
+    "unlink",
+    "cache",
+    "config",
+    "login",
+    "logout",
+    "whoami"
+  ],
+  "required_semantics": [
+    "dependency-tree",
+    "lockfile",
+    "workspace-filtering",
+    "lifecycle-exit-code",
+    "binary-resolution",
+    "npmrc-scoped-registry",
+    "authentication"
+  ],
+  "supported_commands": [
+    "install",
+    "ci",
+    "add",
+    "remove",
+    "update",
+    "run",
+    "exec",
+    "pack",
+    "view",
+    "ls",
+    "outdated",
+    "dedupe",
+    "link",
+    "unlink",
+    "cache",
+    "config",
+    "login",
+    "logout",
+    "whoami",
+    "publish"
+  ],
+  "preview_commands": ["stage", "transfer"],
+  "intentional_exceptions": [
+    {
+      "surface": "lifecycle scripts without verified containment",
+      "behavior": "security_divergence",
+      "rationale": "Oath fails closed rather than silently executing uncontained native code."
+    },
+    {
+      "surface": "Bun runtime, bundler, and test runner",
+      "behavior": "deferred",
+      "rationale": "The Bun engine program is independent of npm/npx package-manager compatibility."
+    }
+  ]
+}

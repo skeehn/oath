@@ -1,4 +1,4 @@
-import { createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
@@ -34,17 +34,31 @@ function decodeBase64(value, expectedBytes) {
 export function verifySignedDocument(document) {
   const detached = document?.signature;
   if (detached?.algorithm !== "ed25519") return false;
-  if (detached?.canonicalization !== "oath-json-v1") return false;
 
   const publicKey = decodeBase64(detached.public_key, 32);
   const signature = decodeBase64(detached.signature, 64);
   if (publicKey === null || signature === null) return false;
 
   const payload = { ...document, signature: null };
+  let signed = Buffer.from(canonicalJson(payload));
+  if (detached?.canonicalization === "oath-json-v1+oath-domain-sha256-v1") {
+    if (typeof detached.domain !== "string" || detached.domain.length === 0) return false;
+    const domain = Buffer.from(detached.domain);
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(domain.length));
+    signed = createHash("sha256")
+      .update(Buffer.from("oath-domain-signature-v1\0"))
+      .update(length)
+      .update(domain)
+      .update(createHash("sha256").update(signed).digest())
+      .digest();
+  } else if (detached?.canonicalization !== "oath-json-v1" || detached.domain !== undefined) {
+    return false;
+  }
   const key = createPublicKey({
     key: Buffer.concat([ED25519_SPKI_PREFIX, publicKey]),
     format: "der",
     type: "spki",
   });
-  return verify(null, Buffer.from(canonicalJson(payload)), key, signature);
+  return verify(null, signed, key, signature);
 }

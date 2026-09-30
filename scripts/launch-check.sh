@@ -78,6 +78,10 @@ echo "==> release smoke install"
   HOME="$SMOKE_HOME" "$BIN" install --yes is-sorted
   node -e 'const isNumber = require("is-number"); const isOdd = require("is-odd"); const isSorted = require("is-sorted"); if (!isNumber(7) || !isOdd(3) || !isSorted([1,2,3])) process.exit(1)'
 
+  OATH_TIMINGS_FILE="$SMOKE_PROJECT/noop-timings.json" HOME="$SMOKE_HOME" "$BIN" install --yes > noop-output.txt
+  grep -q 'verified no-op' noop-output.txt
+  node -e 'const r=require("./noop-timings.json"); if(!r.no_op || r.phases_ms.resolve !== 0 || r.phases_ms.download !== 0 || r.phases_ms.link !== 0) process.exit(1)'
+
   if HOME="$SMOKE_HOME" "$BIN" install --frozen-lockfile isarray; then
     echo "expected frozen package install to fail" >&2
     exit 1

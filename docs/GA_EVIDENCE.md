@@ -93,3 +93,19 @@ attestation, and is attached to the corresponding release. This document is a
 human index and intentionally does not maintain a mutable latest-run pointer;
 the signed manifest attached to the exact candidate is the release claim source
 of truth.
+
+## Versioned qualifying reports
+
+The manifest evaluator also consumes versioned, checksum-bound reports for
+detection quality, cross-platform performance, production deployment,
+independent audits, witnessed transparency, and the 60-day beta ledger. Every
+report that represents a release candidate must bind to the same full Git
+commit. Detection reports fail when any discovered sample was not scanned or a
+scan error was hidden. Performance requires passing reports from Linux, macOS,
+and Windows with the published minimum sample counts and equivalent npm/Oath
+trees. Transparency requires an unexpired Rekor-bound checkpoint and at least
+two distinct witness identities.
+
+These contracts make the remaining work measurable; they are not evidence that
+the measurements have passed. Until qualifying external and production reports
+exist, `ga_gate.technical_ready` and `ga_gate.ready` remain false.

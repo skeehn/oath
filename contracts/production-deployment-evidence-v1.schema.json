@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.dev/schemas/production-deployment-evidence-v1.schema.json",
+  "title": "Oath ProductionDeploymentEvidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_class", "release_commit", "generated_at", "provider", "regions", "deployment_digest", "offerings", "controls", "qualifies_for_ga", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_class": { "const": "production-deployment" },
+    "release_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "provider": { "type": "string", "minLength": 1 },
+    "regions": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "type": "string" } },
+    "deployment_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "offerings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["multi_tenant", "managed_isolated", "same_binaries_and_apis"],
+      "properties": {
+        "multi_tenant": { "const": true },
+        "managed_isolated": { "const": true },
+        "same_binaries_and_apis": { "const": true }
+      }
+    },
+    "controls": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ha_postgresql", "versioned_object_storage", "cdn", "kms_signing", "workload_identity", "distributed_rate_limits", "tenant_isolation_tested", "zero_downtime_migrations_tested"],
+      "properties": {
+        "ha_postgresql": { "const": true },
+        "versioned_object_storage": { "const": true },
+        "cdn": { "const": true },
+        "kms_signing": { "const": true },
+        "workload_identity": { "const": true },
+        "distributed_rate_limits": { "const": true },
+        "tenant_isolation_tested": { "const": true },
+        "zero_downtime_migrations_tested": { "const": true }
+      }
+    },
+    "qualifies_for_ga": { "type": "boolean" },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

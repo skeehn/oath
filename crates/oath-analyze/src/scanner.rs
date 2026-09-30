@@ -28,43 +28,78 @@ impl PackageScanner {
         let mut verdict_reasons = Vec::new();
         let mut has_install_script = false;
 
-        // Check for install scripts in package.json first
+        // Check for install scripts in package.json first. A manifest that cannot be
+        // read or parsed must not silently hide lifecycle code.
         let pkg_json_path = package_dir.join("package.json");
         if pkg_json_path.exists() {
-            let content = std::fs::read_to_string(&pkg_json_path)?;
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                let scripts = json.get("scripts");
-                for hook in &["preinstall", "install", "postinstall"] {
-                    if let Some(script) = scripts.and_then(|s| s.get(hook))
-                        && let Some(cmd) = script.as_str()
-                    {
-                        has_install_script = true;
-                        // The install command itself is often the payload.
-                        behavior::scan_install_command(cmd, &mut install_behavior);
-                        all_findings.push(Finding {
-                            kind: FindingKind::InstallScript,
-                            risk: RiskLevel::Medium,
-                            message: format!("{hook} script: {cmd}"),
-                            file: "package.json".to_string(),
-                            line: 0,
-                            snippet: Some(cmd.chars().take(120).collect()),
-                        });
+            match std::fs::read_to_string(&pkg_json_path) {
+                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(json) => {
+                        let scripts = json.get("scripts");
+                        for hook in &["preinstall", "install", "postinstall"] {
+                            if let Some(script) = scripts.and_then(|s| s.get(hook))
+                                && let Some(cmd) = script.as_str()
+                            {
+                                has_install_script = true;
+                                // The install command itself is often the payload.
+                                behavior::scan_install_command(cmd, &mut install_behavior);
+                                all_findings.push(Finding {
+                                    kind: FindingKind::InstallScript,
+                                    risk: RiskLevel::Medium,
+                                    message: format!("{hook} script: {cmd}"),
+                                    file: "package.json".to_string(),
+                                    line: 0,
+                                    snippet: Some(cmd.chars().take(120).collect()),
+                                });
+                            }
+                        }
                     }
-                }
+                    Err(error) => record_incomplete_analysis(
+                        &mut all_findings,
+                        &mut package_verdict,
+                        &mut verdict_reasons,
+                        "package.json".to_string(),
+                        format!("package.json could not be parsed: {error}"),
+                    ),
+                },
+                Err(error) => record_incomplete_analysis(
+                    &mut all_findings,
+                    &mut package_verdict,
+                    &mut verdict_reasons,
+                    "package.json".to_string(),
+                    format!("package.json could not be read: {error}"),
+                ),
             }
         }
 
         // Walk all JS/TS files
-        for entry in WalkDir::new(package_dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
+        for entry in WalkDir::new(package_dir).follow_links(false) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let file = error
+                        .path()
+                        .and_then(|path| path.strip_prefix(package_dir).ok())
+                        .unwrap_or_else(|| error.path().unwrap_or(package_dir))
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    record_incomplete_analysis(
+                        &mut all_findings,
+                        &mut package_verdict,
+                        &mut verdict_reasons,
+                        file,
+                        format!("package entry could not be inspected: {error}"),
+                    );
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-            // Only analyze JS/TS source files, skip minified/test files
+            // Only analyze executable JS/TS source files.
             if !matches!(ext, "js" | "mjs" | "cjs" | "ts" | "tsx") {
                 continue;
             }
@@ -83,22 +118,35 @@ impl PackageScanner {
                 .to_string_lossy()
                 .replace('\\', "/");
 
-            // Test fixtures are not package runtime code. Match only package-relative
-            // components and filename conventions; an absolute parent such as
-            // `/tmp/detection-test` must never make the whole package disappear.
-            if is_test_source(&relative_path) {
-                continue;
-            }
-
-            let source = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => continue, // skip binary-looking files
+            let bytes = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    record_incomplete_analysis(
+                        &mut all_findings,
+                        &mut package_verdict,
+                        &mut verdict_reasons,
+                        relative_path,
+                        format!("executable source could not be read: {error}"),
+                    );
+                    continue;
+                }
             };
-
-            // Skip massive minified bundles (>500KB -- not useful to scan)
-            if source.len() > 500_000 {
-                continue;
-            }
+            let source = match String::from_utf8(bytes) {
+                Ok(source) => source,
+                Err(error) => {
+                    let invalid_at = error.utf8_error().valid_up_to();
+                    record_incomplete_analysis(
+                        &mut all_findings,
+                        &mut package_verdict,
+                        &mut verdict_reasons,
+                        relative_path.clone(),
+                        format!(
+                            "executable source is not valid UTF-8 at byte {invalid_at}; scanned with lossy decoding"
+                        ),
+                    );
+                    String::from_utf8_lossy(error.as_bytes()).into_owned()
+                }
+            };
 
             lines_scanned += source.lines().count();
             files_scanned += 1;
@@ -124,6 +172,18 @@ impl PackageScanner {
 
             let mut analyzer = Analyzer::new(source, relative_path);
             analyzer.analyze()?;
+            if analyzer
+                .findings
+                .iter()
+                .any(|finding| finding.kind == FindingKind::AnalysisIncomplete)
+            {
+                merge_verdict(
+                    &mut package_verdict,
+                    &mut verdict_reasons,
+                    Verdict::Warn,
+                    vec![incomplete_analysis_reason().to_string()],
+                );
+            }
             all_findings.extend(analyzer.findings);
         }
 
@@ -183,18 +243,31 @@ impl PackageScanner {
     }
 }
 
-fn is_test_source(relative_path: &str) -> bool {
-    let normalized = relative_path.replace('\\', "/").to_ascii_lowercase();
-    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
-    normalized.split('/').any(|component| {
-        matches!(
-            component,
-            "test" | "tests" | "__tests__" | "spec" | "specs" | "fixtures" | "__fixtures__"
-        )
-    }) || file_name.contains(".test.")
-        || file_name.contains(".spec.")
-        || file_name.starts_with("test-")
-        || file_name.starts_with("spec-")
+fn incomplete_analysis_reason() -> &'static str {
+    "analysis incomplete; one or more executable package inputs require review"
+}
+
+fn record_incomplete_analysis(
+    findings: &mut Vec<Finding>,
+    package_verdict: &mut Verdict,
+    verdict_reasons: &mut Vec<String>,
+    file: String,
+    message: String,
+) {
+    findings.push(Finding {
+        kind: FindingKind::AnalysisIncomplete,
+        risk: RiskLevel::High,
+        message,
+        file,
+        line: 0,
+        snippet: None,
+    });
+    merge_verdict(
+        package_verdict,
+        verdict_reasons,
+        Verdict::Warn,
+        vec![incomplete_analysis_reason().to_string()],
+    );
 }
 
 fn merge_verdict(
@@ -553,18 +626,4 @@ pub fn detect_advanced_obfuscation(source: &str, relative_path: &str) -> Vec<Fin
     }
 
     findings
-}
-
-#[cfg(test)]
-mod path_tests {
-    use super::is_test_source;
-
-    #[test]
-    fn test_source_filter_uses_package_relative_conventions() {
-        assert!(!is_test_source("index.js"));
-        assert!(!is_test_source("latest/index.js"));
-        assert!(is_test_source("tests/index.js"));
-        assert!(is_test_source("src/parser.spec.ts"));
-        assert!(is_test_source("fixtures/payload.js"));
-    }
 }

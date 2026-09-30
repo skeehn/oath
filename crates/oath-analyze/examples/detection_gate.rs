@@ -286,6 +286,45 @@ fn corpus_complete(corpus: &CorpusResult) -> bool {
     corpus.discovered > 0 && corpus.discovered == corpus.scanned && corpus.errors.is_empty()
 }
 
+fn corpus_evidence(
+    corpus: &CorpusResult,
+    metadata: &serde_json::Value,
+    name: &str,
+) -> serde_json::Value {
+    let metadata = metadata
+        .pointer(&format!("/corpora/{name}"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut value = serde_json::json!({
+        "dataset_digest": format!("sha256:{}", corpus.corpus_digest),
+        "discovered": corpus.discovered,
+        "scanned": corpus.scanned,
+        "blocked": corpus.blocked,
+        "rate": corpus.rate,
+        "wilson_95": corpus.wilson_95,
+        "results": corpus.results,
+        "scan_errors": corpus.errors,
+        "exclusions": metadata.get("exclusions").cloned().unwrap_or_else(|| serde_json::json!([])),
+    });
+    if name == "private_holdout" {
+        let object = value.as_object_mut().expect("corpus evidence is an object");
+        for field in [
+            "family_separated",
+            "time_separated",
+            "labels_independently_held",
+        ] {
+            object.insert(
+                field.into(),
+                metadata
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Bool(false)),
+            );
+        }
+    }
+    value
+}
+
 fn main() {
     let arguments = parse_arguments().unwrap_or_else(|error| {
         eprintln!("{error}");
@@ -319,29 +358,43 @@ fn main() {
         && exfiltration.blocked == exfiltration.scanned;
     let qualifying = arguments.qualification == "qualifying";
     let qualifies_for_ga = measurements_pass && qualifying && metadata_errors.is_empty();
+    let release_commit = metadata
+        .get("source_commit")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0000000000000000000000000000000000000000");
+    let generated_at = metadata
+        .get("captured_at")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("1970-01-01T00:00:00Z");
     let output = serde_json::json!({
-        "schema_version": 1,
-        "evidence_class": "oath-detection-quality",
+        "schema_version": 2,
+        "evidence_class": "detection-quality",
         "qualification": arguments.qualification,
-        "static_analysis_only": true,
-        "metadata_digest": digest_hex(&metadata_bytes),
-        "metadata": metadata,
-        "metadata_validation_errors": metadata_errors,
-        "threshold": "HIGH_OR_CRITICAL",
-        "corpora": {
-            "benign": benign,
-            "known_malware": known,
-            "private_holdout": holdout,
-            "secret_exfiltration": exfiltration,
+        "release_commit": release_commit,
+        "generated_at": generated_at,
+        "engine": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "rule_bundle_digest": format!("sha256:{}", digest_hex(include_bytes!("../src/patterns.rs"))),
+            "known_malware_feed_digest": format!("sha256:{}", known.corpus_digest),
         },
-        "ga_gate": {
-            "known_malware_recall_target": KNOWN_MALWARE_TARGET,
-            "private_holdout_recall_target": PRIVATE_HOLDOUT_TARGET,
-            "benign_false_positive_target": BENIGN_FP_TARGET,
-            "secret_exfiltration_block_target": 1.0,
-            "measurements_pass": measurements_pass,
-            "qualifies_for_ga": qualifies_for_ga,
-        }
+        "corpora": {
+            "benign": corpus_evidence(&benign, &metadata, "benign"),
+            "known_malware": corpus_evidence(&known, &metadata, "known_malware"),
+            "private_holdout": corpus_evidence(&holdout, &metadata, "private_holdout"),
+            "secret_exfiltration": corpus_evidence(&exfiltration, &metadata, "secret_exfiltration"),
+        },
+        "thresholds": {
+            "known_malware_recall": KNOWN_MALWARE_TARGET,
+            "private_holdout_recall": PRIVATE_HOLDOUT_TARGET,
+            "benign_false_positive_rate": BENIGN_FP_TARGET,
+            "secret_exfiltration_block_rate": 1.0,
+        },
+        "measurements_pass": measurements_pass,
+        "qualifies_for_ga": qualifies_for_ga,
+        "errors": metadata_errors,
+        "limitations": [
+            "Static and structural analysis does not prove a package safe; containment and registry evidence are evaluated separately."
+        ]
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
     let passes_selected_mode = if qualifying {

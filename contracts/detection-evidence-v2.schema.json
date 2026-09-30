@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.dev/schemas/detection-evidence-v2.schema.json",
+  "title": "Oath DetectionEvidenceReport v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "evidence_class", "qualification", "release_commit",
+    "generated_at", "engine", "corpora", "thresholds", "measurements_pass", "qualifies_for_ga",
+    "errors", "limitations"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "evidence_class": { "const": "detection-quality" },
+    "qualification": { "enum": ["self-test", "qualifying"] },
+    "release_commit": { "$ref": "#/$defs/commit" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "rule_bundle_digest", "known_malware_feed_digest"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "rule_bundle_digest": { "$ref": "#/$defs/digest" },
+        "known_malware_feed_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "corpora": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["known_malware", "benign", "private_holdout", "secret_exfiltration"],
+      "properties": {
+        "known_malware": { "$ref": "#/$defs/measurement" },
+        "benign": { "$ref": "#/$defs/measurement" },
+        "private_holdout": {
+          "allOf": [
+            { "$ref": "#/$defs/measurement" },
+            {
+              "type": "object",
+              "required": ["family_separated", "time_separated", "labels_independently_held"],
+              "properties": {
+                "family_separated": { "type": "boolean" },
+                "time_separated": { "type": "boolean" },
+                "labels_independently_held": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "secret_exfiltration": { "$ref": "#/$defs/measurement" }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["known_malware_recall", "private_holdout_recall", "benign_false_positive_rate", "secret_exfiltration_block_rate"],
+      "properties": {
+        "known_malware_recall": { "const": 0.99 },
+        "private_holdout_recall": { "const": 0.95 },
+        "benign_false_positive_rate": { "const": 0.005 },
+        "secret_exfiltration_block_rate": { "const": 1 }
+      }
+    },
+    "qualifies_for_ga": { "type": "boolean" },
+    "measurements_pass": { "type": "boolean" },
+    "errors": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["dataset_digest", "discovered", "scanned", "blocked", "rate", "wilson_95", "exclusions", "scan_errors"],
+      "properties": {
+        "dataset_digest": { "$ref": "#/$defs/digest" },
+        "discovered": { "type": "integer", "minimum": 1 },
+        "scanned": { "type": "integer", "minimum": 1 },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "wilson_95": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lower", "upper"],
+          "properties": {
+            "lower": { "type": "number", "minimum": 0, "maximum": 1 },
+            "upper": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "exclusions": { "type": "array", "items": { "type": "object" } },
+        "scan_errors": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

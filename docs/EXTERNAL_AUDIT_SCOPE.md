@@ -27,6 +27,15 @@ retest disposition, and a detached signature. GA requires zero unresolved high
 or critical findings. A report under NDA may remain private, but Oath publishes
 the reviewer, scope, dates, finding counts, exclusions, and report digest.
 
-Run `node scripts/build-audit-bundle.mjs audit-dist` from a clean candidate to
-produce checksum-locked review inputs. The generated bundle is preparation, not
-proof that an audit occurred.
+Run the internal adversarial review first, then attach its report to the clean,
+exact-candidate bundle:
+
+```sh
+node scripts/run-internal-containment-review.mjs --output internal-containment-review.json
+node scripts/build-audit-bundle.mjs audit-dist --internal-review internal-containment-review.json
+```
+
+The bundle includes checksummed analyzer, sandbox, registry, deployment,
+compatibility, qualification, and review inputs. Both the internal report and
+the generated bundle are preparation, not proof that an independent audit
+occurred.

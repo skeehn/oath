@@ -17,6 +17,32 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: wait-for-migrations
+          image: oath-registry:local
+          imagePullPolicy: IfNotPresent
+          args: ["wait-for-migrations"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: oath-registry-secrets
+                  key: database-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
       containers:
         - name: registry
           image: oath-registry:local
@@ -27,6 +53,8 @@ spec:
                 secretKeyRef:
                   name: oath-registry-secrets
                   key: database-url
+            - name: OATH_DATABASE_ROLE
+              value: oath_api
             - name: OATH_PUBLIC_URL
               valueFrom:
                 configMapKeyRef:
@@ -44,6 +72,22 @@ spec:
                   key: object-bucket
             - name: OATH_REQUIRE_STEP_UP_APPROVAL
               value: "true"
+            - name: OATH_ANALYZER_BACKEND
+              value: remote
+            - name: OATH_ANALYZER_URL
+              value: http://oath-analysis-worker:4874
+            # Development base only. Overlay this with HTTPS/mTLS for production.
+            - name: OATH_ANALYZER_ALLOW_INSECURE_INTERNAL
+              value: "1"
+            - name: OATH_ANALYZER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: oath-registry-secrets
+                  key: analyzer-token
+            - name: OATH_REGISTRY_RATE_LIMIT_BACKEND
+              value: postgres
+            - name: OATH_REGISTRY_SIGNER
+              value: file
           ports:
             - name: http
               containerPort: 4873

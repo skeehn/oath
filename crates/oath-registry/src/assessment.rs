@@ -2,6 +2,7 @@ use crate::{hex_sha256, now};
 use anyhow::{Context, Result};
 use oath_analyze::{PackageScanner, RiskLevel};
 use oath_contracts::{Decision, PackageIdentity, ReasonCode, RegistryVerdictV1};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io::Read, path::Path};
 
@@ -9,6 +10,7 @@ const MAX_ARCHIVE_ENTRIES: usize = 200_000;
 const MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegistryAssessmentBundle {
     pub verdict: RegistryVerdictV1,
     pub evidence: Value,

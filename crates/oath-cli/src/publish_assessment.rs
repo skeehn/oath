@@ -218,15 +218,26 @@ fn looks_sensitive_path(path: &str) -> bool {
 
 fn content_secret_marker(bytes: &[u8]) -> Option<&'static str> {
     let text = String::from_utf8_lossy(bytes);
-    [
+    let fixed = [
         ("-----BEGIN PRIVATE KEY-----", "private-key"),
         ("-----BEGIN RSA PRIVATE KEY-----", "rsa-private-key"),
         ("AKIA", "aws-access-key-id"),
         ("ghp_", "github-token"),
-        ("npm_", "npm-token"),
     ]
     .into_iter()
-    .find_map(|(marker, reason)| text.contains(marker).then_some(reason))
+    .find_map(|(marker, reason)| text.contains(marker).then_some(reason));
+    fixed.or_else(|| contains_npm_token(&text).then_some("npm-token"))
+}
+
+fn contains_npm_token(text: &str) -> bool {
+    text.match_indices("npm_").any(|(offset, _)| {
+        let candidate = &text[offset + 4..];
+        let token_len = candidate
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric())
+            .count();
+        token_len >= 36
+    })
 }
 
 fn inferred_capabilities(contents: &[Vec<u8>]) -> Vec<String> {
@@ -497,6 +508,14 @@ fn attach_previous_release_from_bases(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npm_lifecycle_environment_names_are_not_tokens() {
+        assert_eq!(content_secret_marker(b"process.env.npm_package_name"), None);
+        assert_eq!(content_secret_marker(b"npm_config_registry"), None);
+        let token = format!("npm_{}", "a".repeat(36));
+        assert_eq!(content_secret_marker(token.as_bytes()), Some("npm-token"));
+    }
 
     #[test]
     fn concurrent_key_creation_converges() {

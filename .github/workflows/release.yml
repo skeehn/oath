@@ -264,9 +264,7 @@ jobs:
             NOTICE
             oath-agent-contracts-${{ github.ref_name }}.tar.gz
             contract-dist/contract-manifest.json
-            contract-dist/schemas/exec-assessment-v3.schema.json
-            contract-dist/schemas/publish-assessment-v2.schema.json
-            contract-dist/schemas/registry-verdict-v1.schema.json
+            contract-dist/schemas/*.schema.json
 
       - name: Create and verify draft GitHub Release
         env:
@@ -316,9 +314,18 @@ jobs:
             contract-dist/contract-manifest.json \
             contract-dist/contract-manifest.json.sha256 \
             contract-dist/schemas/exec-assessment-v3.schema.json \
+            contract-dist/schemas/compatibility-evidence-v1.schema.json \
+            contract-dist/schemas/detection-evidence-v2.schema.json \
+            contract-dist/schemas/independent-audit-report-v1.schema.json \
+            contract-dist/schemas/operational-drill-report-v2.schema.json \
+            contract-dist/schemas/performance-evidence-v1.schema.json \
+            contract-dist/schemas/performance-evidence-v2.schema.json \
+            contract-dist/schemas/production-deployment-evidence-v1.schema.json \
             contract-dist/schemas/publish-assessment-v2.schema.json \
             contract-dist/schemas/registry-verdict-v1.schema.json \
+            contract-dist/schemas/transparency-checkpoint-v3.schema.json \
             contract-dist/types/oath-contracts.ts \
+            contract-dist/manifests/npm-compatibility-manifest-v1.json \
             checksums.txt \
             release-evidence/ga-evidence-manifest.json \
             release-evidence/ga-evidence-manifest.json.sha256
@@ -327,6 +334,8 @@ jobs:
           checksums.txt
           contract-manifest.json
           contract-manifest.json.sha256
+          compatibility-evidence-v1.schema.json
+          detection-evidence-v2.schema.json
           exec-assessment-v3.schema.json
           ga-evidence-manifest.json
           ga-evidence-manifest.json.sha256
@@ -345,8 +354,15 @@ jobs:
           oath-windows-arm64.exe.sha256
           oath-windows-x64.exe
           oath-windows-x64.exe.sha256
+          independent-audit-report-v1.schema.json
+          operational-drill-report-v2.schema.json
+          performance-evidence-v1.schema.json
+          performance-evidence-v2.schema.json
+          npm-compatibility-manifest-v1.json
+          production-deployment-evidence-v1.schema.json
           publish-assessment-v2.schema.json
           registry-verdict-v1.schema.json
+          transparency-checkpoint-v3.schema.json
           LICENSE
           LICENSE.sha256
           NOTICE

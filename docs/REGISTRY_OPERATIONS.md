@@ -10,9 +10,10 @@ Build and start the service with:
 
 ```sh
 cargo build --release --locked --bin oath-registry
+OATH_MIGRATION_DATABASE_URL=postgresql://... ./target/release/oath-registry migrate
 DATABASE_URL=postgresql://... \
 OATH_REGISTRY_DATA=/var/lib/oath-registry \
-./target/release/oath-registry
+./target/release/oath-registry serve
 ```
 
 The process listens on `OATH_REGISTRY_BIND` (default `0.0.0.0:4873`). Put it
@@ -26,6 +27,7 @@ rootless OCI container. For an isolated local beta stack:
 ```sh
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 export OATH_REGISTRY_TOKEN="$(openssl rand -hex 32)"
+export OATH_ANALYZER_TOKEN="$(openssl rand -hex 32)"
 docker compose -f deploy/compose.yaml up --build
 curl --fail http://localhost:4873/readyz
 ```
@@ -41,11 +43,17 @@ Required configuration:
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL control plane. Startup migrations run automatically and fail closed on ambiguous historical package ownership or visibility. |
+| `OATH_MIGRATION_DATABASE_URL` | Privileged migration connection. Migration creates schema version 5, the non-login `oath_api`/`oath_worker` roles, and tenant RLS policies. |
+| `DATABASE_URL` | Restricted API PostgreSQL connection. Give its login role membership in `oath_api`; never give it schema-owner or `BYPASSRLS` privileges. |
+| `OATH_WORKER_DATABASE_URL` | Optional worker connection, falling back to `DATABASE_URL`. Give hosted worker credentials membership in `oath_worker`. |
+| `OATH_DATABASE_ROLE` | Explicitly `SET ROLE oath_api` or `oath_worker` on every pooled connection. Use it when the login owns membership rather than being the restricted role itself. |
 | `OATH_REGISTRY_DATA` | Durable signing-key and local-object root. The generated `registry-signing.key` is mode `0600` on Unix and must be backed up securely. |
 | `OATH_PUBLIC_URL` | External HTTPS origin used in tarball metadata. It defaults to `http://localhost:4873` for local development and must be set in a deployed beta. |
 | `OATH_REGISTRY_BIND` | Listener address and port. Defaults to `0.0.0.0:4873`. |
 | `OATH_REQUIRE_STEP_UP_APPROVAL` | Set to `true` in every hosted deployment. Approval then requires a fresh OIDC token whose `amr`/`acr` proves MFA, OTP, hardware-key, FIDO, or WebAuthn authentication. |
+| `OATH_REGISTRY_RATE_LIMIT_BACKEND` | `postgres` (default) or `redis`; Redis additionally requires `REDIS_URL`. |
+| `OATH_REGISTRY_SIGNER` | `file` (default) or `remote`. Remote signing requires `OATH_REGISTRY_SIGNER_URL` and `OATH_REGISTRY_SIGNER_TOKEN`; returned Ed25519 signatures are verified locally over the versioned, domain-separated SHA-256 digest. |
+| `OATH_ANALYZER_BACKEND` | `inline` (default) or `remote`. Remote analysis requires `OATH_ANALYZER_URL` and `OATH_ANALYZER_TOKEN`. HTTPS is mandatory except loopback; `OATH_ANALYZER_ALLOW_INSECURE_INTERNAL=1` is a development-only escape hatch for an isolated Compose or Kubernetes network and must be removed in favor of mTLS/HTTPS before production qualification. |
 
 One-time bootstrap configuration:
 
@@ -80,9 +88,11 @@ Optional integrations are fail-closed configuration pairs:
 `OATH_REGISTRY_MAX_STAGE_REQUEST_BYTES` controls the JSON stage-request limit.
 It defaults to 64 MiB and accepts 1 MiB through 1 GiB. Because tarballs are
 base64 encoded in the current beta API, usable tarball bytes are lower than the
-HTTP limit. Enforce a matching authenticated route limit at the reverse proxy.
+HTTP limit. The isolated analysis worker reads the same value and derives a
+base64-plus-JSON body limit, so every API and worker deployment must receive the
+same setting. Enforce a matching authenticated route limit at the reverse proxy.
 `OATH_REGISTRY_REQUESTS_PER_MINUTE` defaults to 6,000 and is enforced through a
-PostgreSQL atomic window keyed by bearer-token hash (or the anonymous bucket).
+PostgreSQL or Redis atomic window keyed by bearer-token hash (or the anonymous bucket).
 `OATH_REGISTRY_MAX_PENDING_STAGES` defaults to 100 and is enforced atomically
 per organization. Both values must be positive. The reverse proxy should still
 apply connection and bandwidth controls.
@@ -102,6 +112,9 @@ Tokens are organization-scoped. Package names have one immutable owning
 organization and one immutable public/private visibility. An administrator in
 another organization is not a global superuser. Cross-organization access
 requires an explicit package role granted by the owning organization.
+Tenant-bound database operations set `oath.organization` with `SET LOCAL` in
+their transaction. RLS is defense in depth: a missing context sees no private
+rows, and a tenant context cannot read or write another organization's rows.
 
 Public package metadata and active tarballs are anonymous. Private package
 metadata, staged artifacts, and tarballs require an authorized bearer token.
@@ -135,12 +148,16 @@ paths after every production revocation and record the transparency checkpoint.
 
 - `GET /livez` proves the process can serve requests.
 - `GET /readyz` and the compatibility alias `GET /health` query PostgreSQL and
-  list every configured object store; dependency failures return a 5xx.
-- `GET /metrics` exposes Prometheus counters for requests, stages, downloads,
-  and denied operations.
+  verify the object store, selected rate limiter, signer, and analyzer;
+  dependency failures return a 5xx.
+- `GET /metrics` exposes Prometheus counters plus cumulative latency histograms
+  and error counters for metadata, tarball, assessment, publish, and revocation
+  operations. Route families are fixed labels; package names never become
+  metric labels.
 - `GET /-/oath/transparency/checkpoint` returns the signed current Merkle root.
 - Core package mutations write audit intent transactionally to a PostgreSQL
-  outbox. The retrying worker appends idempotent signed hash-chain events.
+  outbox. Workers claim batches with leases and `FOR UPDATE SKIP LOCKED`; the
+  retrying delivery path remains idempotent by event key.
 - The checkpoint and inclusion endpoints expose domain-separated Merkle roots
   and sibling proofs. The consistency endpoint returns a compact prefix/suffix
   frontier that reconstructs both historical and current roots in logarithmic
@@ -165,6 +182,13 @@ smoke, then complete the operator drills in
 itself certify restore RPO/RTO, process-kill atomicity, key rotation, or regional
 failover.
 
+Qualifying environments use `scripts/run-operational-drill.mjs` to execute a
+provider-specific fault command without a shell and emit the cloud-neutral
+`OperationalDrillReport v2` contract. The runner requires a deployment digest,
+regions, explicit assertions, and a checksum-bound log. A failed command or
+assertion produces a failed report and a nonzero exit; backup/restore reports
+also require measured RPO and RTO.
+
 ## Known beta limits
 
 - No built-in TLS, invitation browser UI, SCIM, customer-managed keys, regional
@@ -172,10 +196,11 @@ failover.
 - OIDC membership exchange selects one organization per subject.
 - Non-package account and billing audit events have not all migrated to the
   transactional outbox yet.
-- External witnesses, remote/KMS signing, and Rekor-backed attestations remain
-  GA work. The included Kubernetes base therefore runs one replica with a
-  protected file-backed signing-key volume; scaling it before shared remote
-  signing exists is unsupported.
+- External witnesses, a selected KMS/HSM adapter, and Rekor-backed attestations
+  remain GA work. A provider-neutral remote signer contract exists, but no
+  cloud-specific signer is selected or qualified.
+- The API, analyzer, outbox, and maintenance modes are independently runnable.
+  Their real hosted failure isolation and multi-region behavior remain unproven.
 - Service SLOs, restore targets, revocation propagation, external security
   review, and design-partner adoption have not yet met the GA gates.
 

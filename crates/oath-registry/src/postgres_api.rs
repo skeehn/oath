@@ -1,4 +1,4 @@
-use std::{io::Read, path::Path, sync::Arc};
+use std::{io::Read, path::Path, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -11,7 +11,6 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,22 +23,27 @@ use sqlx_postgres::PgPool;
 use crate::{
     ApiError, DecisionRequest, PackageRoleRequest, Principal, RevokeRequest, StageRecord,
     StageRequest, TokenRequest, TransparencyCheckpoint,
+    analysis_backend::{SharedAnalysisBackend, analysis_backend_from_env},
+    assessment::RegistryAssessmentBundle,
     billing::StripeBilling,
     control_plane::PostgresControlPlane,
     hex_sha256,
     identity::{InvitationMailer, OidcVerifier},
     merkle_consistency_proof, merkle_inclusion_proof, merkle_root,
-    metrics::RegistryMetrics,
+    metrics::{RegistryMetrics, RegistryOperation},
     now,
     object_backend::ArtifactStore,
-    registry_signing_key,
+    rate_limit::{SharedRateLimiter, rate_limiter_from_env},
+    signer::{SharedSigner, signer_from_env},
 };
 
 #[derive(Clone)]
 pub struct PostgresRegistry {
     control: PostgresControlPlane,
     objects: ArtifactStore,
-    signing_key: SigningKey,
+    signer: SharedSigner,
+    rate_limiter: SharedRateLimiter,
+    analysis: SharedAnalysisBackend,
     oidc: Option<OidcVerifier>,
     mailer: Option<InvitationMailer>,
     public_url: String,
@@ -50,6 +54,7 @@ pub struct PostgresRegistry {
     require_step_up_approval: bool,
     requests_per_minute: i64,
     maximum_pending_stages: i64,
+    outbox_worker_id: String,
 }
 
 impl PostgresRegistry {
@@ -108,10 +113,16 @@ impl PostgresRegistry {
         );
         let requests_per_minute = positive_limit("OATH_REGISTRY_REQUESTS_PER_MINUTE", 6_000)?;
         let maximum_pending_stages = positive_limit("OATH_REGISTRY_MAX_PENDING_STAGES", 100)?;
+        let control = PostgresControlPlane::connect(database_url).await?;
+        let signer = signer_from_env(key_path).await?;
+        let rate_limiter = rate_limiter_from_env(control.clone())?;
+        let analysis = analysis_backend_from_env()?;
         Ok(Self {
-            control: PostgresControlPlane::connect(database_url).await?,
+            control,
             objects,
-            signing_key: registry_signing_key(key_path)?,
+            signer,
+            rate_limiter,
+            analysis,
             oidc,
             mailer,
             public_url: std::env::var("OATH_PUBLIC_URL")
@@ -128,6 +139,22 @@ impl PostgresRegistry {
                 .unwrap_or(false),
             requests_per_minute,
             maximum_pending_stages,
+            outbox_worker_id: format!("registry-{}-{}", std::process::id(), crate::now()),
+        })
+    }
+
+    async fn detached_signature(
+        &self,
+        domain: &str,
+        payload: &[u8],
+    ) -> Result<oath_contracts::DetachedSignature> {
+        Ok(oath_contracts::DetachedSignature {
+            algorithm: "ed25519".into(),
+            canonicalization: "oath-json-v1+oath-domain-sha256-v1".into(),
+            domain: Some(domain.to_owned()),
+            public_key: base64::engine::general_purpose::STANDARD.encode(self.signer.public_key()),
+            signature: base64::engine::general_purpose::STANDARD
+                .encode(self.signer.sign(domain, payload).await?),
         })
     }
 
@@ -190,7 +217,7 @@ impl PostgresRegistry {
     ) -> Result<String, ApiError> {
         if let Some(package) = self
             .control
-            .package(name)
+            .package_for(name, Some(&principal.organization))
             .await
             .map_err(ApiError::internal)?
         {
@@ -257,8 +284,11 @@ impl PostgresRegistry {
                 .unwrap_or_else(|| "GENESIS".into());
         let event_json = serde_json::to_string(event)?;
         let event_hash = hex_sha256(format!("{previous}{event_json}").as_bytes());
-        let signature = base64::engine::general_purpose::STANDARD
-            .encode(self.signing_key.sign(event_hash.as_bytes()).to_bytes());
+        let signature = base64::engine::general_purpose::STANDARD.encode(
+            self.signer
+                .sign("transparency-event", event_hash.as_bytes())
+                .await?,
+        );
         query("INSERT INTO registry_events(event_key,event_json,previous_hash,event_hash,signature,created_at) VALUES ($1,$2,$3,$4,$5,$6)")
             .bind(event_key)
             .bind(event_json)
@@ -281,16 +311,23 @@ impl PostgresRegistry {
     }
 
     pub async fn drain_outbox(&self) -> Result<usize> {
-        let pending = self.control.pending_outbox(100).await?;
+        let pending = self
+            .control
+            .claim_outbox(&self.outbox_worker_id, 100)
+            .await?;
         let mut delivered = 0;
         for (id, event_key, event) in pending {
             match self.append_event_keyed(&event_key, &event).await {
                 Ok(()) => {
-                    self.control.mark_outbox_delivered(id).await?;
+                    self.control
+                        .mark_outbox_delivered(id, &self.outbox_worker_id)
+                        .await?;
                     delivered += 1;
                 }
                 Err(error) => {
-                    self.control.retry_outbox(id).await?;
+                    self.control
+                        .retry_outbox(id, &self.outbox_worker_id)
+                        .await?;
                     tracing::warn!(outbox_id = id, %error, "registry audit event delivery failed");
                 }
             }
@@ -299,8 +336,8 @@ impl PostgresRegistry {
     }
 
     pub async fn prune_expired_rate_limits(&self) -> Result<u64> {
-        self.control
-            .prune_rate_limits_before(now().saturating_sub(24 * 3600) as i64)
+        self.rate_limiter
+            .prune(now().saturating_sub(24 * 3600) as i64)
             .await
     }
 }
@@ -322,6 +359,8 @@ async fn track_registry_metrics(
     next: Next,
 ) -> Response {
     metrics.request();
+    let operation = registry_operation(request.method().as_str(), request.uri().path());
+    let started = Instant::now();
     let response = next.run(request).await;
     if matches!(
         response.status(),
@@ -332,7 +371,40 @@ async fn track_registry_metrics(
     if response.status().is_server_error() {
         metrics.error();
     }
+    if let Some(operation) = operation {
+        metrics.observe(
+            operation,
+            started.elapsed(),
+            !response.status().is_server_error(),
+        );
+    }
     response
+}
+
+fn registry_operation(method: &str, path: &str) -> Option<RegistryOperation> {
+    if method == "POST" && path.ends_with("/revoke") && path.contains("/-/oath/versions/") {
+        return Some(RegistryOperation::Revocation);
+    }
+    if method == "POST" && path.ends_with("/approve") && path.contains("/-/oath/stages/") {
+        return Some(RegistryOperation::Publish);
+    }
+    if method == "POST" && path == "/-/oath/stages" {
+        return Some(RegistryOperation::Assessment);
+    }
+    if method == "GET" && (path.contains("/-/oath/tarballs/") || path.ends_with("/download")) {
+        return Some(RegistryOperation::Tarball);
+    }
+    if method == "GET" && path.starts_with("/v1/verdicts/") {
+        return Some(RegistryOperation::Assessment);
+    }
+    if method == "GET"
+        && !matches!(path, "/health" | "/livez" | "/readyz" | "/metrics")
+        && !path.starts_with("/-/")
+        && !path.starts_with("/v1/")
+    {
+        return Some(RegistryOperation::Metadata);
+    }
+    None
 }
 
 fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -416,6 +488,46 @@ fn manifest_from_tarball(
     Ok(manifest)
 }
 
+fn validate_assessment_bundle(
+    bundle: &RegistryAssessmentBundle,
+    tarball: &[u8],
+    manifest: &Value,
+    name: &str,
+    version: &str,
+    publisher: &str,
+    registry: &str,
+) -> Result<(), ApiError> {
+    let expected_package_digest = format!("sha256:{}", hex_sha256(tarball));
+    let expected_manifest_digest =
+        oath_contracts::digest_json(manifest).map_err(ApiError::internal)?;
+    let verdict = &bundle.verdict;
+    let evidence_package_digest = bundle
+        .evidence
+        .get("package_digest")
+        .and_then(Value::as_str);
+    let evidence_manifest_digest = bundle
+        .evidence
+        .get("manifest_digest")
+        .and_then(Value::as_str);
+    let assessment_digest =
+        oath_contracts::digest_json(&bundle.evidence).map_err(ApiError::internal)?;
+    let valid = verdict.package.name == name
+        && verdict.package.version == version
+        && verdict.package.registry == registry
+        && verdict.package.publisher.as_deref() == Some(publisher)
+        && verdict.package.integrity.as_deref() == Some(expected_package_digest.as_str())
+        && verdict.package_digest == expected_package_digest
+        && evidence_package_digest == Some(expected_package_digest.as_str())
+        && evidence_manifest_digest == Some(expected_manifest_digest.as_str())
+        && verdict.assessment_digest == assessment_digest;
+    if !valid {
+        return Err(ApiError::bad(
+            "analysis response is not bound to the submitted package, manifest, publisher, and registry",
+        ));
+    }
+    Ok(())
+}
+
 async fn livez() -> Json<Value> {
     Json(json!({"status":"ok","service":"oath-registry","schema_version":1}))
 }
@@ -423,10 +535,27 @@ async fn livez() -> Json<Value> {
 async fn readyz(State(registry): State<Arc<PostgresRegistry>>) -> Result<Json<Value>, ApiError> {
     registry.control.ready().await.map_err(ApiError::internal)?;
     registry.objects.ready().await.map_err(ApiError::internal)?;
+    registry
+        .rate_limiter
+        .ready()
+        .await
+        .map_err(ApiError::internal)?;
+    registry.signer.ready().await.map_err(ApiError::internal)?;
+    registry
+        .analysis
+        .ready()
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(json!({
         "status":"ready",
         "service":"oath-registry",
-        "dependencies":{"postgresql":"ready","object_store":"ready"},
+        "dependencies":{
+            "postgresql":"ready",
+            "object_store":"ready",
+            "rate_limiter":{"status":"ready","backend":registry.rate_limiter.backend()},
+            "signer":{"status":"ready","backend":registry.signer.backend()},
+            "analyzer":{"status":"ready","backend":registry.analysis.backend()}
+        },
         "schema_version":2
     })))
 }
@@ -442,7 +571,7 @@ async fn create_stage(
         .await?;
     if let Some(package) = registry
         .control
-        .package(&request.name)
+        .package_for(&request.name, Some(&principal.organization))
         .await
         .map_err(ApiError::internal)?
         && package.private != request.private
@@ -460,17 +589,33 @@ async fn create_stage(
         .map_err(|_| ApiError::bad("invalid tarball base64"))?;
     let manifest = manifest_from_tarball(&tarball, &request.name, &request.version)?;
     let digest = hex_sha256(&tarball);
-    let mut server_bundle = crate::assessment::assess_tarball(
+    let mut server_bundle = registry
+        .analysis
+        .assess(
+            &tarball,
+            &manifest,
+            &request.name,
+            &request.version,
+            &principal.organization,
+            &registry.public_url,
+        )
+        .await
+        .map_err(|error| ApiError::bad(format!("server assessment failed: {error}")))?;
+    validate_assessment_bundle(
+        &server_bundle,
         &tarball,
         &manifest,
         &request.name,
         &request.version,
         &principal.organization,
         &registry.public_url,
-    )
-    .map_err(|error| ApiError::bad(format!("server assessment failed: {error}")))?;
+    )?;
+    let verdict_bytes =
+        oath_contracts::canonical_json_bytes(&server_bundle.verdict).map_err(ApiError::internal)?;
     server_bundle.verdict.signature = Some(
-        oath_contracts::sign_json(&server_bundle.verdict, &registry.signing_key)
+        registry
+            .detached_signature("assessment-verdict", &verdict_bytes)
+            .await
             .map_err(ApiError::internal)?,
     );
     registry
@@ -543,7 +688,7 @@ async fn view_stage(
     let principal = registry.authenticate(&headers).await?;
     let stage = registry
         .control
-        .read_stage(&id)
+        .read_stage_for(&id, Some(&principal.organization))
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("stage not found"))?;
@@ -585,7 +730,7 @@ async fn decide(
     }
     let stage = registry
         .control
-        .read_stage(&id)
+        .read_stage_for(&id, Some(&principal.organization))
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("stage not found"))?;
@@ -618,7 +763,7 @@ async fn decide(
     Ok(Json(
         registry
             .control
-            .read_stage(&id)
+            .read_stage_for(&id, Some(&principal.organization))
             .await
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::internal("stage disappeared"))?,
@@ -647,25 +792,27 @@ async fn package_metadata(
     headers: HeaderMap,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let principal = registry.authenticate_optional(&headers).await?;
     let package = registry
         .control
-        .package(&name)
+        .package_for(
+            &name,
+            principal.as_ref().map(|value| value.organization.as_str()),
+        )
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("package not found"))?;
     if package.private {
-        let principal = registry
-            .authenticate_optional(&headers)
-            .await?
-            .ok_or_else(ApiError::unauthorized)?;
-        registry.authorize_name(&principal, &name, false).await?;
-    } else {
-        registry.authenticate_optional(&headers).await?;
+        let principal = principal.as_ref().ok_or_else(ApiError::unauthorized)?;
+        registry.authorize_name(principal, &name, false).await?;
     }
     let mut versions = serde_json::Map::new();
     for row in registry
         .control
-        .package_versions(&name)
+        .package_versions_for(
+            &name,
+            principal.as_ref().map(|value| value.organization.as_str()),
+        )
         .await
         .map_err(ApiError::internal)?
     {
@@ -718,7 +865,10 @@ async fn package_metadata(
     }
     let tags = registry
         .control
-        .dist_tags(&name)
+        .dist_tags_for(
+            &name,
+            principal.as_ref().map(|value| value.organization.as_str()),
+        )
         .await
         .map_err(ApiError::internal)?
         .into_iter()
@@ -745,10 +895,14 @@ async fn revoke_version(
     let created_at = now();
     let payload = json!({"name":name,"version":version,"status":status,"reason":request.reason,"actor_org":principal.organization,"created_at":created_at});
     let bytes = oath_contracts::canonical_json_bytes(&payload).map_err(ApiError::internal)?;
-    let signature = base64::engine::general_purpose::STANDARD
-        .encode(registry.signing_key.sign(&bytes).to_bytes());
-    let public_key = base64::engine::general_purpose::STANDARD
-        .encode(registry.signing_key.verifying_key().to_bytes());
+    let signature = base64::engine::general_purpose::STANDARD.encode(
+        registry
+            .signer
+            .sign("revocation-tombstone", &bytes)
+            .await
+            .map_err(ApiError::internal)?,
+    );
+    let public_key = base64::engine::general_purpose::STANDARD.encode(registry.signer.public_key());
     let event = json!({"type":"version.revoked","tombstone":payload.clone(),"signature":signature,"public_key":public_key});
     let event_key = format!("version.{status}:{name}@{version}");
     if !registry
@@ -777,7 +931,8 @@ async fn revoke_version(
         "tombstone": {
             "payload": payload,
             "algorithm": "ed25519",
-            "canonicalization": "oath-json-v1",
+            "canonicalization": "oath-json-v1+oath-domain-sha256-v1",
+            "domain": "revocation-tombstone",
             "signature": signature,
             "public_key": public_key
         }
@@ -789,15 +944,20 @@ async fn download_version(
     headers: HeaderMap,
     AxumPath((name, version)): AxumPath<(String, String)>,
 ) -> Result<Response, ApiError> {
+    let principal = registry.authenticate_optional(&headers).await?;
     let row = registry
         .control
-        .version(&name, &version)
+        .version_for(
+            &name,
+            &version,
+            principal.as_ref().map(|value| value.organization.as_str()),
+        )
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("package version not found"))?;
     if row.private {
-        let principal = registry.authenticate(&headers).await?;
-        registry.authorize_name(&principal, &name, false).await?;
+        let principal = principal.as_ref().ok_or_else(ApiError::unauthorized)?;
+        registry.authorize_name(principal, &name, false).await?;
     }
     if row.status != "active" {
         return Err(ApiError::forbidden(format!(
@@ -863,18 +1023,22 @@ async fn checkpoint(
     });
     let signature = base64::engine::general_purpose::STANDARD.encode(
         registry
-            .signing_key
-            .sign(&oath_contracts::canonical_json_bytes(&payload).map_err(ApiError::internal)?)
-            .to_bytes(),
+            .signer
+            .sign(
+                "transparency-checkpoint",
+                &oath_contracts::canonical_json_bytes(&payload).map_err(ApiError::internal)?,
+            )
+            .await
+            .map_err(ApiError::internal)?,
     );
     Ok(Json(TransparencyCheckpoint {
         schema_version: 2,
         event_count: hashes.len(),
         merkle_root: root,
         latest_hash: hashes.last().cloned(),
-        canonicalization: "oath-json-v1".into(),
-        public_key: base64::engine::general_purpose::STANDARD
-            .encode(registry.signing_key.verifying_key().to_bytes()),
+        canonicalization: "oath-json-v1+oath-domain-sha256-v1".into(),
+        domain: "transparency-checkpoint".into(),
+        public_key: base64::engine::general_purpose::STANDARD.encode(registry.signer.public_key()),
         signature,
     }))
 }
@@ -947,15 +1111,20 @@ async fn verdict_bundle(
     headers: HeaderMap,
     AxumPath((name, version)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    let principal = registry.authenticate_optional(&headers).await?;
     let record = registry
         .control
-        .version_bundle(&name, &version)
+        .version_bundle_for(
+            &name,
+            &version,
+            principal.as_ref().map(|value| value.organization.as_str()),
+        )
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("package version not found"))?;
     if record.private {
-        let principal = registry.authenticate(&headers).await?;
-        registry.authorize_name(&principal, &name, false).await?;
+        let principal = principal.as_ref().ok_or_else(ApiError::unauthorized)?;
+        registry.authorize_name(principal, &name, false).await?;
     }
     let hashes = registry
         .control
@@ -971,12 +1140,14 @@ async fn verdict_bundle(
     });
     let checkpoint_signature = base64::engine::general_purpose::STANDARD.encode(
         registry
-            .signing_key
+            .signer
             .sign(
+                "transparency-checkpoint",
                 &oath_contracts::canonical_json_bytes(&checkpoint_payload)
                     .map_err(ApiError::internal)?,
             )
-            .to_bytes(),
+            .await
+            .map_err(ApiError::internal)?,
     );
     let tombstone = record.tombstone.map(tombstone_bundle).transpose()?;
     Ok(Json(json!({
@@ -994,8 +1165,9 @@ async fn verdict_bundle(
         "checkpoint":{
             "payload":checkpoint_payload,
             "algorithm":"ed25519",
-            "canonicalization":"oath-json-v1",
-            "public_key":base64::engine::general_purpose::STANDARD.encode(registry.signing_key.verifying_key().to_bytes()),
+            "canonicalization":"oath-json-v1+oath-domain-sha256-v1",
+            "domain":"transparency-checkpoint",
+            "public_key":base64::engine::general_purpose::STANDARD.encode(registry.signer.public_key()),
             "signature":checkpoint_signature,
         }
     })))
@@ -1018,7 +1190,8 @@ fn tombstone_bundle(value: Value) -> Result<Value, ApiError> {
             "created_at": field("created_at")?
         },
         "algorithm": "ed25519",
-        "canonicalization": "oath-json-v1",
+        "canonicalization": "oath-json-v1+oath-domain-sha256-v1",
+        "domain": "revocation-tombstone",
         "signature": field("signature")?,
         "public_key": field("public_key")?
     }))
@@ -1428,8 +1601,8 @@ async fn enforce_registry_rate_limit(
         .map(|value| hex_sha256(value.as_bytes()))
         .unwrap_or_else(|| "anonymous".into());
     let allowed = registry
-        .control
-        .consume_rate_limit(&subject, "api-minute", registry.requests_per_minute, 60)
+        .rate_limiter
+        .consume(&subject, "api-minute", registry.requests_per_minute, 60)
         .await
         .map_err(ApiError::internal)?;
     if !allowed {
@@ -1444,6 +1617,31 @@ async fn enforce_registry_rate_limit(
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+
+    #[test]
+    fn classifies_slo_operations_without_dynamic_metric_labels() {
+        assert_eq!(
+            registry_operation("GET", "/left-pad"),
+            Some(RegistryOperation::Metadata)
+        );
+        assert_eq!(
+            registry_operation("GET", "/-/oath/tarballs/left-pad/1.0.0"),
+            Some(RegistryOperation::Tarball)
+        );
+        assert_eq!(
+            registry_operation("POST", "/-/oath/stages"),
+            Some(RegistryOperation::Assessment)
+        );
+        assert_eq!(
+            registry_operation("POST", "/-/oath/stages/123/approve"),
+            Some(RegistryOperation::Publish)
+        );
+        assert_eq!(
+            registry_operation("POST", "/-/oath/versions/pkg/1.0.0/revoke"),
+            Some(RegistryOperation::Revocation)
+        );
+        assert_eq!(registry_operation("GET", "/metrics"), None);
+    }
     use http_body_util::{BodyExt, Collected};
     use object_store::memory::InMemory;
     use sha2::{Digest, Sha256};
@@ -1562,6 +1760,46 @@ mod tests {
         assert!(manifest_from_tarball(b"not-a-tarball", "demo", "1.2.3").is_err());
     }
 
+    #[test]
+    fn assessment_bundle_is_cryptographically_bound_to_stage_inputs() {
+        let tarball = package_tarball("demo", "1.2.3");
+        let manifest = manifest_from_tarball(&tarball, "demo", "1.2.3").unwrap();
+        let mut bundle = crate::assessment::assess_tarball(
+            &tarball,
+            &manifest,
+            "demo",
+            "1.2.3",
+            "acme",
+            "https://registry.example",
+        )
+        .unwrap();
+        assert!(
+            validate_assessment_bundle(
+                &bundle,
+                &tarball,
+                &manifest,
+                "demo",
+                "1.2.3",
+                "acme",
+                "https://registry.example",
+            )
+            .is_ok()
+        );
+        bundle.evidence["manifest_digest"] = json!("sha256:deadbeef");
+        assert!(
+            validate_assessment_bundle(
+                &bundle,
+                &tarball,
+                &manifest,
+                "demo",
+                "1.2.3",
+                "acme",
+                "https://registry.example",
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn live_postgres_enforces_tenants_publish_download_and_revoke() {
         let Ok(database_url) = std::env::var("OATH_TEST_DATABASE_URL") else {
@@ -1573,6 +1811,9 @@ mod tests {
             .await
             .unwrap();
         pool.close().await;
+        PostgresControlPlane::migrate_url(&database_url)
+            .await
+            .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let store = ArtifactStore::new(Arc::new(InMemory::new()));
         let registry = PostgresRegistry::connect(&database_url, store, &temp.path().join("key"))
@@ -1761,6 +2002,9 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .into(),
+            domain: private_bundle["checkpoint"]["domain"]
+                .as_str()
+                .map(str::to_owned),
             public_key: private_bundle["checkpoint"]["public_key"]
                 .as_str()
                 .unwrap()
@@ -1884,6 +2128,9 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_owned(),
+            domain: revocation["tombstone"]["domain"]
+                .as_str()
+                .map(str::to_owned),
             public_key: revocation["tombstone"]["public_key"]
                 .as_str()
                 .unwrap()
@@ -2161,6 +2408,99 @@ mod tests {
         assert_eq!(
             keyed_events.get::<i64, _>("total"),
             keyed_events.get::<i64, _>("unique_total")
+        );
+
+        // Exercise the same non-owner role a hosted API process receives.
+        // Missing tenant context cannot see private rows; tenant context is
+        // transaction-local and never exposes a rival organization's rows.
+        let mut rls = registry_assertions.control.pool().begin().await.unwrap();
+        query("SET LOCAL ROLE oath_api")
+            .execute(&mut *rls)
+            .await
+            .unwrap();
+        let private_without_context: i64 =
+            query_scalar("SELECT COUNT(*) FROM packages WHERE private=true")
+                .fetch_one(&mut *rls)
+                .await
+                .unwrap();
+        assert_eq!(private_without_context, 0);
+        query("SELECT set_config('oath.organization','acme',true)")
+            .execute(&mut *rls)
+            .await
+            .unwrap();
+        let acme_private: i64 = query_scalar(
+            "SELECT COUNT(*) FROM packages WHERE organization='acme' AND private=true",
+        )
+        .fetch_one(&mut *rls)
+        .await
+        .unwrap();
+        let rival_private: i64 = query_scalar(
+            "SELECT COUNT(*) FROM packages WHERE organization='rival' AND private=true",
+        )
+        .fetch_one(&mut *rls)
+        .await
+        .unwrap();
+        assert!(acme_private > 0);
+        assert_eq!(rival_private, 0);
+        rls.rollback().await.unwrap();
+
+        let mut rls_write = registry_assertions.control.pool().begin().await.unwrap();
+        query("SET LOCAL ROLE oath_api")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        query("SELECT set_config('oath.organization','rival',true)")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        assert!(query("INSERT INTO packages(name,organization,private,created_at) VALUES ('cross-tenant-write','acme',true,0)")
+            .execute(&mut *rls_write).await.is_err());
+        // The expected RLS violation above aborted this transaction; start a
+        // fresh one for the remaining cross-tenant checks.
+        rls_write.rollback().await.unwrap();
+        let mut rls_write = registry_assertions.control.pool().begin().await.unwrap();
+        query("SET LOCAL ROLE oath_api")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        query("SELECT set_config('oath.organization','rival',true)")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        let public_delete = query("DELETE FROM packages WHERE name='public-tool'")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        assert_eq!(public_delete.rows_affected(), 0);
+        let public_update = query("UPDATE packages SET private=true WHERE name='public-tool'")
+            .execute(&mut *rls_write)
+            .await
+            .unwrap();
+        assert_eq!(public_update.rows_affected(), 0);
+        rls_write.rollback().await.unwrap();
+
+        let api_control = PostgresControlPlane::connect_with_role(&database_url, Some("oath_api"))
+            .await
+            .unwrap();
+        let api_principal = api_control
+            .authenticate(&hex_sha256(b"secret"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(api_principal.organization, "acme");
+        assert!(
+            api_control
+                .package_for("private-tool", Some("acme"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            api_control
+                .package_for("private-tool", Some("rival"))
+                .await
+                .unwrap()
+                .is_none()
         );
 
         let response = call(&app, get_request("/metrics", None)).await;

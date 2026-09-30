@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oath-analysis-worker
+  annotations:
+    oath.dev/transport-note: "Base uses authenticated cluster HTTP; require mTLS or a service mesh before production"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oath-analysis-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oath-analysis-worker
+    spec:
+      serviceAccountName: oath-registry
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: analysis-worker
+          image: oath-registry:local
+          args: ["analysis-worker"]
+          env:
+            - name: OATH_ANALYZER_BIND
+              value: 0.0.0.0:4874
+            - name: OATH_ANALYZER_TOKEN
+              valueFrom:
+                secretKeyRef: {name: oath-registry-secrets, key: analyzer-token}
+            - name: OATH_REGISTRY_MAX_STAGE_REQUEST_BYTES
+              value: "67108864"
+          ports:
+            - {name: http, containerPort: 4874}
+          readinessProbe:
+            tcpSocket: {port: http}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oath-analysis-worker
+spec:
+  selector:
+    app.kubernetes.io/name: oath-analysis-worker
+  ports:
+    - {name: http, port: 4874, targetPort: http}

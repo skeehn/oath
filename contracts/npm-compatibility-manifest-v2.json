@@ -1,0 +1,356 @@
+{
+  "schema_version": 2,
+  "product": "oath-cli",
+  "compatibility_target": "npm/npx",
+  "reference": {
+    "npm_major": 11,
+    "pinned_version": "11.12.1",
+    "canary_policy": "latest npm 11 on every release candidate"
+  },
+  "status_definitions": {
+    "implementation": ["complete", "partial", "missing", "intentional-divergence"],
+    "evidence": ["none", "unit", "local-contract", "local-differential", "cross-platform", "qualified"]
+  },
+  "qualification": {
+    "status": "open",
+    "required_evidence": "qualified",
+    "reason": "Exact-head Linux, macOS, and Windows command/flag differentials have not passed."
+  },
+  "commands": [
+    {
+      "name": "install",
+      "aliases": ["i", "add"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "install.project", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "install.package-spec", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "install.workspace", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "install.global", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "install.production-omit", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "install.lockfile-only", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "install.package-lock-only", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "ci",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "ci.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "ci.workspace", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "ci.production-omit", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "add",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "add.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "add.dev", "implementation": "complete", "evidence": "unit" },
+        { "id": "add.workspace-forms", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "add.optional-peer-exact", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "remove",
+      "aliases": ["uninstall", "rm"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "remove.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "remove.workspace-forms", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "remove.global", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "update",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "update.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "update.workspace-forms", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "update.global", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "run",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "run.script-args", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "run.workspace-forms", "implementation": "complete", "evidence": "unit" },
+        { "id": "run.if-present", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "run.ignore-scripts", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "exec",
+      "aliases": ["x", "npx"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "exec.positional-package", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.local-bin-resolution", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.package-repeatable", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.call", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.interactive-no-command", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.yes-no-prompt", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.workspace-forms", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "exec.fail-closed-containment-default", "implementation": "complete", "evidence": "unit" },
+        { "id": "exec.explicit-uncontained-opt-out", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "pack",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "pack.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "pack.dry-run-json", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "pack.workspace-forms", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "pack.ignore-scripts", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "publish",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "publish.dry-run-json", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "publish.workspace-forms", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "publish.tag-access", "implementation": "complete", "evidence": "unit" },
+        { "id": "publish.provenance-oidc", "implementation": "complete", "evidence": "local-contract" },
+        { "id": "publish.otp", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "view",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "view.package", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "view.field-path", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "view.json", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "view.multiple-fields", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "ls",
+      "aliases": ["ll", "list"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "ls.depth", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "ls.json", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "ls.workspace", "implementation": "complete", "evidence": "unit" },
+        { "id": "ls.production-omit", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "outdated",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "outdated.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "outdated.json", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "outdated.workspace", "implementation": "complete", "evidence": "unit" },
+        { "id": "outdated.global", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "dedupe",
+      "aliases": ["find-dupes"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "dedupe.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "dedupe.dry-run", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "dedupe.prefer-dedupe", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "link",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "link.global-source", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "link.consume", "implementation": "complete", "evidence": "unit" },
+        { "id": "link.workspace", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "unlink",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "unlink.global-source", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "unlink.package", "implementation": "complete", "evidence": "unit" },
+        { "id": "unlink.workspace", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "cache",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "cache.verify", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "cache.add", "implementation": "complete", "evidence": "local-contract" },
+        { "id": "cache.clean", "implementation": "complete", "evidence": "unit" },
+        { "id": "cache.ls", "implementation": "complete", "evidence": "local-contract" },
+        { "id": "cache.npx-ls-rm-info", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "config",
+      "aliases": ["get", "set"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "config.get", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "config.set", "implementation": "complete", "evidence": "unit" },
+        { "id": "config.delete", "implementation": "complete", "evidence": "unit" },
+        { "id": "config.list", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "config.edit", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "config.fix", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "config.location-global", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "login",
+      "aliases": ["adduser"],
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "login.token", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "login.scope", "implementation": "complete", "evidence": "unit" },
+        { "id": "login.web", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "login.legacy", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "logout",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "logout.registry", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "logout.scope", "implementation": "complete", "evidence": "unit" }
+      ]
+    },
+    {
+      "name": "whoami",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "whoami.registry-auth", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "whoami.json", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "init",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "local-differential",
+      "surfaces": [
+        { "id": "init.default", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "init.yes-scope-private", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "init.initializer-package", "implementation": "complete", "evidence": "unit" },
+        { "id": "init.workspace", "implementation": "complete", "evidence": "unit" },
+        { "id": "init.interactive-prompts", "implementation": "complete", "evidence": "local-differential" }
+      ]
+    },
+    {
+      "name": "audit",
+      "replacement_required": true,
+      "implementation": "complete",
+      "evidence": "unit",
+      "surfaces": [
+        { "id": "audit.malware-capability-scan", "implementation": "intentional-divergence", "evidence": "unit" },
+        { "id": "audit.cve-bulk-advisories", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "audit.json", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "audit.fix", "implementation": "complete", "evidence": "local-differential" },
+        { "id": "audit.signatures", "implementation": "complete", "evidence": "local-contract" }
+      ]
+    },
+    { "name": "prune", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "prune.ideal-tree-extraneous-removal", "implementation": "complete", "evidence": "local-differential" }, { "id": "prune.lifecycle-and-flag-parity", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "rebuild", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "rebuild.package-selection", "implementation": "complete", "evidence": "local-differential" }, { "id": "rebuild.contained-lifecycle", "implementation": "complete", "evidence": "unit" }, { "id": "rebuild.npm-flag-parity", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "pkg", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "pkg.get-set-delete", "implementation": "complete", "evidence": "local-differential" }, { "id": "pkg.fix-full-normalization", "implementation": "complete", "evidence": "local-differential" }, { "id": "pkg.workspace-forms", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "query", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "query.core-selectors", "implementation": "complete", "evidence": "local-differential" }, { "id": "query.full-dependency-selector-language", "implementation": "complete", "evidence": "local-differential" }, { "id": "query.workspace-forms", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "version", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "version.exact-major-minor-patch", "implementation": "complete", "evidence": "local-differential" }, { "id": "version.workspace-forms", "implementation": "complete", "evidence": "unit" }, { "id": "version.lifecycle-git-tag", "implementation": "complete", "evidence": "local-differential" }, { "id": "version.prerelease-flags", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "search", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "search.registry", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "sbom", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "sbom.spdx-cyclonedx-components", "implementation": "complete", "evidence": "local-differential" }, { "id": "sbom.dependency-relationships", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "dist-tag", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "dist-tag.add-rm-ls", "implementation": "complete", "evidence": "local-differential" }, { "id": "dist-tag.authenticated-transport", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "access", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "access.public-restricted", "implementation": "complete", "evidence": "unit" }, { "id": "access.grant-revoke", "implementation": "complete", "evidence": "unit" }, { "id": "access.list-packages-collaborators", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "trust", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "trust.github-gitlab-circleci", "implementation": "complete", "evidence": "unit" }, { "id": "trust.list", "implementation": "complete", "evidence": "local-differential" }, { "id": "trust.revoke", "implementation": "complete", "evidence": "unit" }, { "id": "trust.validation-dry-run", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "token", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "token.list", "implementation": "complete", "evidence": "local-differential" }, { "id": "token.create-revoke", "implementation": "complete", "evidence": "unit" }, { "id": "token.readonly-cidr-otp", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "deprecate", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "deprecate.package-range", "implementation": "complete", "evidence": "local-differential" }, { "id": "deprecate.authenticated-transport", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "undeprecate", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "undeprecate.package-range", "implementation": "complete", "evidence": "local-differential" }, { "id": "undeprecate.authenticated-transport", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "unpublish", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "unpublish.package-version", "implementation": "complete", "evidence": "local-differential" }, { "id": "unpublish.full-package-revision", "implementation": "complete", "evidence": "unit" }, { "id": "unpublish.force-dry-run", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "explain", "aliases": ["why"], "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "explain.package", "implementation": "complete", "evidence": "local-differential" }, { "id": "explain.path", "implementation": "complete", "evidence": "local-differential" }, { "id": "explain.json", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "root", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "root.local-global", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "prefix", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "prefix.local-global", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "fund", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "fund.default-json-which", "implementation": "complete", "evidence": "local-differential" }, { "id": "fund.browser-launch", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "ping", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "ping.registry", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "doctor", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "doctor.toolchain-project-store-registry", "implementation": "complete", "evidence": "unit" }, { "id": "doctor.failure-exit-diagnostics", "implementation": "complete", "evidence": "local-differential" }, { "id": "doctor.npm-permission-remediation", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "diff", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "diff.local-specs", "implementation": "complete", "evidence": "local-differential" }, { "id": "diff.registry-specs", "implementation": "complete", "evidence": "unit" }, { "id": "diff.name-only-json", "implementation": "complete", "evidence": "local-differential" }, { "id": "diff.unified-content-hunks", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "shrinkwrap", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "shrinkwrap.lockfile", "implementation": "complete", "evidence": "local-differential" }, { "id": "shrinkwrap.oath-lock-conversion", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "approve-scripts", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "approve-scripts.policy", "implementation": "complete", "evidence": "local-differential" }, { "id": "approve-scripts.workspace-forms", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "deny-scripts", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "deny-scripts.policy", "implementation": "complete", "evidence": "local-differential" }, { "id": "deny-scripts.workspace-forms", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "install-scripts", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "install-scripts.policy-selection", "implementation": "complete", "evidence": "local-differential" }, { "id": "install-scripts.analysis-containment", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "stage", "replacement_required": false, "implementation": "intentional-divergence", "evidence": "local-differential", "surfaces": [{ "id": "stage.list-view-download", "implementation": "complete", "evidence": "local-contract" }, { "id": "stage.approve-reject-otp", "implementation": "complete", "evidence": "local-contract" }, { "id": "stage.publish-protocol", "implementation": "complete", "evidence": "local-contract" }, { "id": "stage.reference-npm-command-absent", "implementation": "intentional-divergence", "evidence": "local-differential" }] },
+    { "name": "install-test", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "install-test.composition", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "install-ci-test", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "install-ci-test.composition", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "test", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "test.run-alias", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "start", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "start.run-alias", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "stop", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "stop.run-alias", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "restart", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "restart.lifecycle", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "completion", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "completion.shell", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "help", "replacement_required": true, "implementation": "complete", "evidence": "unit", "surfaces": [{ "id": "help.clap", "implementation": "complete", "evidence": "unit" }] },
+    { "name": "help-search", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "help-search.docs", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "bugs", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "bugs.browser", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "docs", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "docs.browser", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "repo", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "repo.browser", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "edit", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "edit.package", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "explore", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "explore.package-command", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "org", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "org.registry-admin", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "owner", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "owner.registry-admin", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "profile", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "profile.get-set", "implementation": "complete", "evidence": "local-differential" }, { "id": "profile.interactive-2fa", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "team", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "team.registry-admin", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "star", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "star.registry", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "stars", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "stars.registry", "implementation": "complete", "evidence": "local-differential" }] },
+    { "name": "unstar", "replacement_required": true, "implementation": "complete", "evidence": "local-differential", "surfaces": [{ "id": "unstar.registry", "implementation": "complete", "evidence": "local-differential" }] }
+  ],
+  "intentional_exceptions": [
+    {
+      "surface": "lifecycle scripts without verified containment",
+      "behavior": "security_divergence",
+      "rationale": "Oath fails closed rather than silently executing uncontained native code."
+    },
+    {
+      "surface": "Bun runtime, bundler, and test runner",
+      "behavior": "deferred",
+      "rationale": "The Bun engine program is independent of npm/npx package-manager compatibility."
+    }
+  ]
+}

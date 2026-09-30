@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx_core::{query::query, query_scalar::query_scalar, raw_sql::raw_sql, row::Row};
-use sqlx_postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx_postgres::{PgConnection, PgPool, PgPoolOptions, PgRow};
 
 use crate::{Principal, StageRecord};
 
@@ -65,15 +65,57 @@ pub struct InvitationRecord {
 
 impl PostgresControlPlane {
     pub async fn connect(url: &str) -> Result<Self> {
+        let role = std::env::var("OATH_DATABASE_ROLE").ok();
+        Self::connect_with_role(url, role.as_deref()).await
+    }
+
+    pub async fn connect_with_role(url: &str, role: Option<&str>) -> Result<Self> {
+        if let Some(role) = role {
+            anyhow::ensure!(
+                matches!(role, "oath_api" | "oath_worker"),
+                "OATH_DATABASE_ROLE must be oath_api or oath_worker"
+            );
+        }
+        let role = role.map(str::to_owned);
         let pool = PgPoolOptions::new()
             .min_connections(1)
             .max_connections(20)
+            .after_connect(move |connection, _metadata| {
+                let role = role.clone();
+                Box::pin(async move {
+                    if let Some(role) = role {
+                        query(&format!("SET ROLE {role}"))
+                            .execute(connection)
+                            .await
+                            .map_err(|error| {
+                                sqlx_core::Error::Protocol(
+                                    format!(
+                                        "SET ROLE {role} failed ({error:#}): the database login user must be a \
+                                         member of the role (as superuser: GRANT {role} TO <login_user>;)"
+                                    ),
+                                )
+                            })?;
+                    }
+                    Ok(())
+                })
+            })
             .connect(url)
             .await
             .context("connect PostgreSQL control plane")?;
         let control = Self { pool };
-        control.migrate().await?;
+        control.verify_schema().await?;
         Ok(control)
+    }
+
+    pub async fn migrate_url(url: &str) -> Result<()> {
+        let pool = PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(url)
+            .await
+            .context("connect PostgreSQL migration control plane")?;
+        let control = Self { pool };
+        control.migrate().await
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -89,11 +131,33 @@ impl PostgresControlPlane {
             .execute(&self.pool)
             .await
             .context("migrate registry limits schema")?;
+        raw_sql(include_str!("../migrations/0004_outbox_leases.sql"))
+            .execute(&self.pool)
+            .await
+            .context("migrate registry outbox leases")?;
+        raw_sql(include_str!("../migrations/0005_tenant_rls.sql"))
+            .execute(&self.pool)
+            .await
+            .context("migrate registry tenant RLS")?;
+        Ok(())
+    }
+
+    async fn verify_schema(&self) -> Result<()> {
+        let version: Option<i32> =
+            query_scalar("SELECT version FROM registry_schema_version WHERE version=5")
+                .fetch_optional(&self.pool)
+                .await
+                .context("registry schema is not initialized; run `oath-registry migrate`")?;
+        anyhow::ensure!(
+            version == Some(5),
+            "registry schema version 5 is required; run `oath-registry migrate`"
+        );
         Ok(())
     }
 
     pub async fn bootstrap_token(&self, organization: &str, hash: &str, role: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, organization).await?;
         query("INSERT INTO organizations(name,created_at) VALUES ($1,$2) ON CONFLICT (name) DO NOTHING")
             .bind(organization).bind(crate::now() as i64).execute(&mut *tx).await?;
         query("INSERT INTO tokens(token_hash,organization,role,expires_at,kind) VALUES ($1,$2,$3,NULL,'bootstrap') ON CONFLICT (token_hash) DO UPDATE SET organization=EXCLUDED.organization, role=EXCLUDED.role, expires_at=NULL, kind='bootstrap'")
@@ -110,14 +174,20 @@ impl PostgresControlPlane {
         expires_at: i64,
         kind: &str,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, organization).await?;
         query("INSERT INTO tokens(token_hash,organization,role,expires_at,kind) VALUES ($1,$2,$3,$4,$5)")
-            .bind(hash).bind(organization).bind(role).bind(expires_at).bind(kind).execute(&self.pool).await?;
+            .bind(hash).bind(organization).bind(role).bind(expires_at).bind(kind).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
     pub async fn authenticate(&self, hash: &str) -> Result<Option<Principal>> {
-        let row = query("SELECT organization,role,kind FROM tokens WHERE token_hash=$1 AND (expires_at IS NULL OR expires_at>$2)")
-            .bind(hash).bind(crate::now() as i64).fetch_optional(&self.pool).await?;
+        let row = query("SELECT organization,role,kind FROM oath_authenticate_token($1,$2)")
+            .bind(hash)
+            .bind(crate::now() as i64)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|row| Principal {
             organization: row.get("organization"),
             role: row.get("role"),
@@ -126,20 +196,36 @@ impl PostgresControlPlane {
     }
 
     pub async fn package_role(&self, name: &str, organization: &str) -> Result<Option<String>> {
-        Ok(
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, organization).await?;
+        let role =
             query_scalar("SELECT role FROM package_roles WHERE name=$1 AND principal_org=$2")
                 .bind(name)
                 .bind(organization)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
+                .fetch_optional(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        Ok(role)
     }
 
     pub async fn package(&self, name: &str) -> Result<Option<PackageRecord>> {
+        self.package_for(name, None).await
+    }
+
+    pub async fn package_for(
+        &self,
+        name: &str,
+        organization: Option<&str>,
+    ) -> Result<Option<PackageRecord>> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(organization) = organization {
+            set_tenant(&mut tx, organization).await?;
+        }
         let row = query("SELECT organization,private FROM packages WHERE name=$1")
             .bind(name)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(row.map(|row| PackageRecord {
             organization: row.get("organization"),
             private: row.get("private"),
@@ -154,6 +240,7 @@ impl PostgresControlPlane {
         maximum_pending_stages: i64,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, &stage.organization).await?;
         query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(&stage.organization)
             .execute(&mut *tx)
@@ -226,14 +313,31 @@ impl PostgresControlPlane {
     }
 
     pub async fn read_stage(&self, id: &str) -> Result<Option<StageRecord>> {
+        self.read_stage_for(id, None).await
+    }
+
+    pub async fn read_stage_for(
+        &self,
+        id: &str,
+        organization: Option<&str>,
+    ) -> Result<Option<StageRecord>> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(organization) = organization {
+            set_tenant(&mut tx, organization).await?;
+        }
         let row = query("SELECT id,organization,name,version,tag,digest,status,private,manifest,publisher_assessment,assessment,server_evidence,sbom,provenance,created_at FROM stages WHERE id=$1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id).fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
         Ok(row.map(stage_from_row))
     }
 
     pub async fn list_stages(&self, organization: &str) -> Result<Vec<StageRecord>> {
-        Ok(query("SELECT id,organization,name,version,tag,digest,status,private,manifest,publisher_assessment,assessment,server_evidence,sbom,provenance,created_at FROM stages WHERE stages.organization=$1 OR EXISTS (SELECT 1 FROM package_roles WHERE package_roles.name=stages.name AND package_roles.principal_org=$1) ORDER BY created_at DESC")
-            .bind(organization).fetch_all(&self.pool).await?.into_iter().map(stage_from_row).collect())
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, organization).await?;
+        let rows = query("SELECT id,organization,name,version,tag,digest,status,private,manifest,publisher_assessment,assessment,server_evidence,sbom,provenance,created_at FROM stages WHERE stages.organization=$1 OR EXISTS (SELECT 1 FROM package_roles WHERE package_roles.name=stages.name AND package_roles.principal_org=$1) ORDER BY created_at DESC")
+            .bind(organization).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(stage_from_row).collect())
     }
 
     pub async fn decide_stage(
@@ -245,6 +349,7 @@ impl PostgresControlPlane {
         event: &Value,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, &stage.organization).await?;
         let status: Option<String> =
             query_scalar("SELECT status FROM stages WHERE id=$1 FOR UPDATE")
                 .bind(&stage.id)
@@ -289,13 +394,27 @@ impl PostgresControlPlane {
     }
 
     pub async fn version(&self, name: &str, version: &str) -> Result<Option<VersionRecord>> {
+        self.version_for(name, version, None).await
+    }
+
+    pub async fn version_for(
+        &self,
+        name: &str,
+        version: &str,
+        organization: Option<&str>,
+    ) -> Result<Option<VersionRecord>> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(organization) = organization {
+            set_tenant(&mut tx, organization).await?;
+        }
         let row = query(
             "SELECT organization,digest,status,private FROM versions WHERE name=$1 AND version=$2",
         )
         .bind(name)
         .bind(version)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(row.map(|row| VersionRecord {
             organization: row.get("organization"),
             digest: row.get("digest"),
@@ -309,8 +428,22 @@ impl PostgresControlPlane {
         name: &str,
         version: &str,
     ) -> Result<Option<VersionBundleRecord>> {
+        self.version_bundle_for(name, version, None).await
+    }
+
+    pub async fn version_bundle_for(
+        &self,
+        name: &str,
+        version: &str,
+        organization: Option<&str>,
+    ) -> Result<Option<VersionBundleRecord>> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(organization) = organization {
+            set_tenant(&mut tx, organization).await?;
+        }
         let row = query("SELECT versions.organization,versions.digest,versions.status,versions.private,versions.assessment,versions.server_evidence,versions.sbom,versions.provenance,versions.published_at,versions.download_count,to_jsonb(tombstones) AS tombstone FROM versions LEFT JOIN tombstones USING (name,version) WHERE versions.name=$1 AND versions.version=$2")
-            .bind(name).bind(version).fetch_optional(&self.pool).await?;
+            .bind(name).bind(version).fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
         Ok(row.map(|row| VersionBundleRecord {
             organization: row.get("organization"),
             digest: row.get("digest"),
@@ -343,8 +476,21 @@ impl PostgresControlPlane {
     }
 
     pub async fn package_versions(&self, name: &str) -> Result<Vec<PackageVersionRecord>> {
+        self.package_versions_for(name, None).await
+    }
+
+    pub async fn package_versions_for(
+        &self,
+        name: &str,
+        organization: Option<&str>,
+    ) -> Result<Vec<PackageVersionRecord>> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(organization) = organization {
+            set_tenant(&mut tx, organization).await?;
+        }
         let rows = query("SELECT organization,version,digest,status,private,manifest,assessment,server_evidence,sbom,provenance,published_at,download_count FROM versions WHERE name=$1 AND status='active' ORDER BY published_at")
-            .bind(name).fetch_all(&self.pool).await?;
+            .bind(name).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| PackageVersionRecord {
@@ -365,19 +511,36 @@ impl PostgresControlPlane {
     }
 
     pub async fn record_download(&self, name: &str, version: &str) -> Result<()> {
-        query("UPDATE versions SET download_count=download_count+1 WHERE name=$1 AND version=$2")
+        let recorded: bool = query_scalar("SELECT oath_record_download($1,$2)")
             .bind(name)
             .bind(version)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
+        anyhow::ensure!(
+            recorded,
+            "active package version disappeared before download accounting"
+        );
         Ok(())
     }
 
     pub async fn dist_tags(&self, name: &str) -> Result<Vec<(String, String)>> {
+        self.dist_tags_for(name, None).await
+    }
+
+    pub async fn dist_tags_for(
+        &self,
+        name: &str,
+        organization: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(organization) = organization {
+            set_tenant(&mut tx, organization).await?;
+        }
         let rows = query("SELECT tag,version FROM dist_tags WHERE name=$1")
             .bind(name)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| (row.get("tag"), row.get("version")))
@@ -399,6 +562,7 @@ impl PostgresControlPlane {
         event: &Value,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, actor_org).await?;
         let updated = query("UPDATE versions SET status=$3 WHERE name=$1 AND version=$2")
             .bind(name)
             .bind(version)
@@ -454,13 +618,20 @@ impl PostgresControlPlane {
         principal_org: &str,
         role: &str,
     ) -> Result<()> {
-        let package = self.package(name).await?.context("package not found")?;
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, owner_org).await?;
+        let package = query("SELECT organization,private FROM packages WHERE name=$1")
+            .bind(name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .context("package not found")?;
         anyhow::ensure!(
-            package.organization == owner_org,
+            package.get::<String, _>("organization") == owner_org,
             "only the package-owning organization may grant roles"
         );
         query("INSERT INTO package_roles(name,organization,principal_org,role) VALUES ($1,$2,$3,$4) ON CONFLICT (name,principal_org) DO UPDATE SET organization=EXCLUDED.organization,role=EXCLUDED.role")
-            .bind(name).bind(owner_org).bind(principal_org).bind(role).execute(&self.pool).await?;
+            .bind(name).bind(owner_org).bind(principal_org).bind(role).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -472,14 +643,21 @@ impl PostgresControlPlane {
         role: &str,
         expires_at: i64,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, organization).await?;
         query("INSERT INTO invitations(token_hash,organization,email,role,expires_at) VALUES ($1,$2,$3,$4,$5)")
-            .bind(token_hash).bind(organization).bind(email).bind(role).bind(expires_at).execute(&self.pool).await?;
+            .bind(token_hash).bind(organization).bind(email).bind(role).bind(expires_at).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
     pub async fn revoke_invitation(&self, token_hash: &str, organization: &str) -> Result<bool> {
-        Ok(query("UPDATE invitations SET revoked_at=$3 WHERE token_hash=$1 AND organization=$2 AND accepted_at IS NULL AND revoked_at IS NULL")
-            .bind(token_hash).bind(organization).bind(crate::now() as i64).execute(&self.pool).await?.rows_affected() == 1)
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, organization).await?;
+        let revoked = query("UPDATE invitations SET revoked_at=$3 WHERE token_hash=$1 AND organization=$2 AND accepted_at IS NULL AND revoked_at IS NULL")
+            .bind(token_hash).bind(organization).bind(crate::now() as i64).execute(&mut *tx).await?.rows_affected() == 1;
+        tx.commit().await?;
+        Ok(revoked)
     }
 
     pub async fn accept_invitation(
@@ -489,8 +667,12 @@ impl PostgresControlPlane {
         email: &str,
     ) -> Result<Option<InvitationRecord>> {
         let mut tx = self.pool.begin().await?;
-        let row = query("SELECT organization,email,role,expires_at FROM invitations WHERE token_hash=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>$2 FOR UPDATE")
-            .bind(token_hash).bind(crate::now() as i64).fetch_optional(&mut *tx).await?;
+        let row =
+            query("SELECT organization,email,role,expires_at FROM oath_lookup_invitation($1,$2)")
+                .bind(token_hash)
+                .bind(crate::now() as i64)
+                .fetch_optional(&mut *tx)
+                .await?;
         let Some(row) = row else {
             tx.rollback().await?;
             return Ok(None);
@@ -501,24 +683,52 @@ impl PostgresControlPlane {
             role: row.get("role"),
             expires_at: row.get("expires_at"),
         };
+        // Set the tenant BEFORE locking: the invitations RLS policy filters on the
+        // tenant setting, so a FOR UPDATE issued before set_tenant sees no row
+        // and acquires no lock.
+        set_tenant(&mut tx, &invitation.organization).await?;
+        // Lock the invitation row so concurrent accepts/revokes serialize; the
+        // guarded UPDATE below then guarantees exactly one winner.
+        let locked = query("SELECT 1 FROM invitations WHERE token_hash=$1 FOR UPDATE")
+            .bind(token_hash)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if locked.is_none() {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         if !invitation.email.eq_ignore_ascii_case(email) {
             tx.rollback().await?;
             anyhow::bail!("invitation email does not match verified identity");
         }
         query("INSERT INTO organization_members(organization,subject,email,role,created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization,subject) DO UPDATE SET email=EXCLUDED.email,role=EXCLUDED.role")
             .bind(&invitation.organization).bind(subject).bind(email).bind(&invitation.role).bind(crate::now() as i64).execute(&mut *tx).await?;
-        query("UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1")
-            .bind(token_hash)
-            .bind(crate::now() as i64)
-            .execute(&mut *tx)
-            .await?;
+        // Re-check revocation and expiry in the guarded UPDATE so a revoke (or
+        // expiry) that lands between the lookup and this statement is honored.
+        let now = crate::now() as i64;
+        let accepted = query(
+            "UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $3",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if !accepted {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         tx.commit().await?;
         Ok(Some(invitation))
     }
 
     pub async fn membership(&self, subject: &str) -> Result<Option<(String, String)>> {
-        let row = query("SELECT organization,role FROM organization_members WHERE subject=$1 ORDER BY created_at LIMIT 1")
-            .bind(subject).fetch_optional(&self.pool).await?;
+        let row = query("SELECT organization,role FROM oath_lookup_membership($1)")
+            .bind(subject)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|row| (row.get("organization"), row.get("role"))))
     }
 
@@ -532,27 +742,45 @@ impl PostgresControlPlane {
             .bind(event_id).bind(event_type).bind(payload).bind(crate::now() as i64).execute(&self.pool).await?.rows_affected()==1)
     }
 
-    pub async fn pending_outbox(&self, limit: i64) -> Result<Vec<(i64, String, Value)>> {
-        let rows = query("SELECT id,event_key,event_json FROM registry_outbox WHERE delivered_at IS NULL AND available_at<=$1 ORDER BY id LIMIT $2")
-            .bind(crate::now() as i64).bind(limit).fetch_all(&self.pool).await?;
+    pub async fn claim_outbox(
+        &self,
+        worker_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, Value)>> {
+        let now = crate::now() as i64;
+        let rows = query(
+            "WITH candidates AS (SELECT id FROM registry_outbox WHERE delivered_at IS NULL AND available_at<=$1 AND (leased_until IS NULL OR leased_until<$1) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE registry_outbox AS outbox SET lease_owner=$3,leased_until=$4,attempts=outbox.attempts+1 FROM candidates WHERE outbox.id=candidates.id RETURNING outbox.id,outbox.event_key,outbox.event_json",
+        )
+        .bind(now)
+        .bind(limit)
+        .bind(worker_id)
+        .bind(now.saturating_add(30))
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(|row| (row.get("id"), row.get("event_key"), row.get("event_json")))
             .collect())
     }
 
-    pub async fn mark_outbox_delivered(&self, id: i64) -> Result<()> {
-        query("UPDATE registry_outbox SET delivered_at=$2 WHERE id=$1")
+    pub async fn mark_outbox_delivered(&self, id: i64, worker_id: &str) -> Result<()> {
+        let result = query("UPDATE registry_outbox SET delivered_at=$3,lease_owner=NULL,leased_until=NULL WHERE id=$1 AND lease_owner=$2")
             .bind(id)
+            .bind(worker_id)
             .bind(crate::now() as i64)
             .execute(&self.pool)
             .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "outbox lease was lost before delivery"
+        );
         Ok(())
     }
 
-    pub async fn retry_outbox(&self, id: i64) -> Result<()> {
-        query("UPDATE registry_outbox SET attempts=attempts+1,available_at=$2 WHERE id=$1")
+    pub async fn retry_outbox(&self, id: i64, worker_id: &str) -> Result<()> {
+        query("UPDATE registry_outbox SET available_at=$3,lease_owner=NULL,leased_until=NULL WHERE id=$1 AND lease_owner=$2")
             .bind(id)
+            .bind(worker_id)
             .bind(crate::now().saturating_add(5) as i64)
             .execute(&self.pool)
             .await?;
@@ -571,6 +799,18 @@ impl PostgresControlPlane {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+async fn set_tenant(connection: &mut PgConnection, organization: &str) -> Result<()> {
+    anyhow::ensure!(
+        !organization.is_empty(),
+        "tenant organization must not be empty"
+    );
+    query("SELECT set_config('oath.organization',$1,true)")
+        .bind(organization)
+        .execute(connection)
+        .await?;
+    Ok(())
 }
 
 fn stage_from_row(row: PgRow) -> StageRecord {

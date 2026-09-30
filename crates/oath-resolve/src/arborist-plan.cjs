@@ -37,6 +37,7 @@ async function main () {
     ignoreScripts: true,
     legacyPeerDeps: boolOption('legacy-peer-deps'),
     strictPeerDeps: boolOption('strict-peer-deps'),
+    preferDedupe: Boolean(request.prefer_dedupe) || boolOption('prefer-dedupe'),
     // npm 11 defaults install-links to false: local directory dependencies
     // remain links unless the project explicitly opts into packed installs.
     installLinks: boolOption('install-links', false)
@@ -46,6 +47,7 @@ async function main () {
   if (request.rm && request.rm.length) idealOptions.rm = request.rm
   if (request.update === true || (Array.isArray(request.update) && request.update.length)) idealOptions.update = request.update
   if (request.save_type) idealOptions.saveType = request.save_type
+  if (Array.isArray(request.workspaces) && request.workspaces.length) idealOptions.workspaces = request.workspaces
   // Compute npm's final platform, optional, peer, and pruning decisions without
   // writing package contents. Oath remains the only materialization authority.
   const tree = await arborist.reify({ ...idealOptions, dryRun: true, ignoreScripts: true })
@@ -75,6 +77,7 @@ async function main () {
       integrity: node.integrity ? String(node.integrity) : null,
       dev: Boolean(node.dev),
       optional: Boolean(node.optional),
+      peer: Boolean(node.peer),
       has_install_script: Boolean(node.package.scripts && (
         node.package.scripts.preinstall ||
         node.package.scripts.install ||

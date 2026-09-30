@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.sh/schemas/performance-evidence-v2.json",
+  "title": "Oath PerformanceEvidence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_type", "generated_at", "environment", "tools", "configuration", "methodology", "integrity", "benchmarks", "phase_catalog", "gates"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "evidence_type": { "const": "PerformanceEvidence" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "environment": {
+      "type": "object",
+      "required": ["platform", "architecture", "os_release", "hostname_hash", "cpu_model", "logical_cpu_count", "total_memory_bytes", "free_memory_bytes_at_start", "node_version", "ci", "github_run_id", "git_commit", "source_tree_clean"],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 },
+        "os_release": { "type": "string", "minLength": 1 },
+        "hostname_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "cpu_model": { "type": "string", "minLength": 1 },
+        "logical_cpu_count": { "type": "integer", "minimum": 1 },
+        "total_memory_bytes": { "type": "integer", "minimum": 1 },
+        "free_memory_bytes_at_start": { "type": "integer", "minimum": 0 },
+        "node_version": { "type": "string", "minLength": 1 },
+        "ci": { "type": ["string", "null"] },
+        "github_run_id": { "type": ["string", "null"] },
+        "git_commit": { "type": ["string", "null"] },
+        "source_tree_clean": { "type": "boolean" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "required": ["npm", "oath"],
+      "properties": {
+        "npm": { "$ref": "#/$defs/tool" },
+        "oath": { "$ref": "#/$defs/tool" },
+        "bun": { "$ref": "#/$defs/tool" }
+      }
+    },
+    "configuration": { "type": "object" },
+    "methodology": { "type": "object" },
+    "integrity": {
+      "type": "object",
+      "required": ["tree_equivalent", "npm_tree_digests", "oath_tree_digests", "input_lock_sha256"],
+      "properties": {
+        "tree_equivalent": { "type": "boolean" },
+        "npm_tree_digests": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+        "oath_tree_digests": { "type": "array", "items": { "$ref": "#/$defs/sha256" }, "uniqueItems": true },
+        "input_lock_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "phase_catalog": {
+      "type": "array",
+      "minItems": 12,
+      "uniqueItems": true,
+      "items": { "enum": ["noop_validation", "resolve", "metadata", "download", "integrity", "extraction", "analysis", "policy", "link", "lifecycle", "lockfile", "cleanup"] }
+    },
+    "benchmarks": {
+      "type": "object",
+      "required": ["cold_install", "warm_install", "warm_noop", "cached_assessment", "cached_exec"],
+      "properties": {
+        "cold_install": { "$ref": "#/$defs/benchmark" },
+        "warm_install": { "$ref": "#/$defs/benchmark" },
+        "warm_noop": { "$ref": "#/$defs/benchmark" },
+        "cached_assessment": { "$ref": "#/$defs/benchmark" },
+        "cached_exec": { "$ref": "#/$defs/benchmark" }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "required": ["cold_install", "warm_install", "warm_noop", "cached_assessment", "cached_exec", "phase_regression", "overall"],
+      "properties": {
+        "cold_install": { "$ref": "#/$defs/gate" },
+        "warm_install": { "$ref": "#/$defs/gate" },
+        "warm_noop": { "$ref": "#/$defs/gate" },
+        "cached_assessment": { "$ref": "#/$defs/gate" },
+        "cached_exec": { "$ref": "#/$defs/gate" },
+        "phase_regression": { "$ref": "#/$defs/gate" },
+        "overall": {
+          "type": "object",
+          "required": ["status", "reasons"],
+          "properties": {
+            "status": { "$ref": "#/$defs/status" },
+            "reasons": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "status": { "enum": ["pass", "fail", "insufficient"] },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "tool": {
+      "type": "object",
+      "required": ["command", "version", "binary_sha256"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "version": { "type": ["string", "null"] },
+        "binary_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "phase_timings": {
+      "type": ["object", "null"],
+      "propertyNames": { "enum": ["noop_validation", "resolve", "metadata", "download", "integrity", "extraction", "analysis", "policy", "link", "lifecycle", "lockfile", "cleanup"] },
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "sample": {
+      "type": "object",
+      "required": ["index", "elapsed_ms", "status", "signal", "timed_out", "error", "cache_state", "stdout_tail", "stderr_tail", "phase_timings_ms"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "number", "minimum": 0 },
+        "status": { "type": ["integer", "null"] },
+        "signal": { "type": ["string", "null"] },
+        "timed_out": { "type": "boolean" },
+        "error": { "type": ["string", "null"] },
+        "cache_state": { "type": "string", "minLength": 1 },
+        "stdout_tail": { "type": "string" },
+        "stderr_tail": { "type": "string" },
+        "phase_timings_ms": { "$ref": "#/$defs/phase_timings" },
+        "tree": {
+          "type": "object",
+          "required": ["entries", "sha256"],
+          "properties": {
+            "entries": { "type": "integer", "minimum": 0 },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["requested", "successful", "failed", "p50_ms", "p95_ms", "min_ms", "max_ms", "raw_samples"],
+      "properties": {
+        "requested": { "type": "integer", "minimum": 0 },
+        "successful": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "p50_ms": { "type": ["number", "null"], "minimum": 0 },
+        "p95_ms": { "type": ["number", "null"], "minimum": 0 },
+        "min_ms": { "type": ["number", "null"], "minimum": 0 },
+        "max_ms": { "type": ["number", "null"], "minimum": 0 },
+        "raw_samples": { "type": "array", "items": { "$ref": "#/$defs/sample" } }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "required": ["unit", "cache_state", "tools"],
+      "properties": {
+        "unit": { "const": "milliseconds" },
+        "cache_state": { "type": "string", "minLength": 1 },
+        "tools": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/summary" } }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["name", "status", "observed", "requirement", "reasons"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "observed": { "type": ["number", "null"] },
+        "requirement": { "type": "object" },
+        "reasons": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

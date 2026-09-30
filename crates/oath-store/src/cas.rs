@@ -338,6 +338,22 @@ impl ContentStore {
                 }
             }
         }
+        let variants = self.root.join(".variants");
+        if let Ok(names) = std::fs::read_dir(variants) {
+            for name in names.flatten().filter(|entry| entry.path().is_dir()) {
+                let package_name = name.file_name().to_string_lossy().replace('+', "/");
+                if let Ok(versions) = std::fs::read_dir(name.path()) {
+                    for version in versions.flatten().filter(|entry| entry.path().is_dir()) {
+                        packages.push((
+                            package_name.clone(),
+                            version.file_name().to_string_lossy().to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        packages.sort();
+        packages.dedup();
         packages
     }
 
@@ -814,6 +830,9 @@ mod tests {
                 .verify_package_variant("pkg", "1.0.0", Some(git_url), None)
                 .is_verified()
         );
+        assert_eq!(store.list_packages(), vec![("pkg".into(), "1.0.0".into())]);
+        store.remove_package("pkg", "1.0.0").unwrap();
+        assert!(store.list_packages().is_empty());
     }
 
     #[test]

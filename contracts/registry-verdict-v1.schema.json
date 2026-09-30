@@ -43,10 +43,17 @@
       "required": ["algorithm", "canonicalization", "public_key", "signature"],
       "properties": {
         "algorithm": { "const": "ed25519" },
-        "canonicalization": { "const": "oath-json-v1" },
+        "canonicalization": { "enum": ["oath-json-v1", "oath-json-v1+oath-domain-sha256-v1"] },
+        "domain": { "type": "string", "minLength": 1 },
         "public_key": { "type": "string" },
         "signature": { "type": "string" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "canonicalization": { "const": "oath-json-v1+oath-domain-sha256-v1" } } },
+          "then": { "required": ["domain"] }
+        }
+      ]
     }
   }
 }

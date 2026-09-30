@@ -8,6 +8,11 @@ runtime imports or bins, records disk samples and durations, snapshots the
 manifest/lockfile outputs, then cleans the temp package store. Bulky logs stay
 local under `compat-results/ai-ecosystem/<timestamp>/logs/`.
 
+These SDKs are package-manager compatibility fixtures only. Oath does not select
+Anthropic—or any hosted model—as a required/default service; its built-in
+assessment path is local and free, and applications remain free to choose any
+model provider.
+
 ## Cases
 
 - `core-ai-sdks`: `openai`, `ai`, `@ai-sdk/openai`, `@ai-sdk/anthropic`, `zod`

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.dev/schemas/independent-audit-report-v1.schema.json",
+  "title": "Oath IndependentAuditReport v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_class", "audit_type", "release_commit", "auditor", "started_at", "finished_at", "status", "open_critical", "open_high", "report_digest", "scope_digest", "limitations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_class": { "const": "independent-security-audit" },
+    "audit_type": { "enum": ["architecture_review", "penetration_test", "sandbox_escape_review"] },
+    "release_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "auditor": { "type": "string", "minLength": 1 },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "status": { "enum": ["passed", "failed", "inconclusive"] },
+    "open_critical": { "type": "integer", "minimum": 0 },
+    "open_high": { "type": "integer", "minimum": 0 },
+    "report_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "scope_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -3,7 +3,9 @@ package oathcontracts
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -98,7 +100,7 @@ func VerifySignedDocument(document []byte) (bool, error) {
 		return false, err
 	}
 	detached, ok := payload["signature"].(map[string]any)
-	if !ok || detached["algorithm"] != "ed25519" || detached["canonicalization"] != "oath-json-v1" {
+	if !ok || detached["algorithm"] != "ed25519" {
 		return false, nil
 	}
 	publicKeyText, ok := detached["public_key"].(string)
@@ -122,5 +124,28 @@ func VerifySignedDocument(document []byte) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return ed25519.Verify(publicKey, canonical, signature), nil
+	signed := canonical
+	switch detached["canonicalization"] {
+	case "oath-json-v1":
+		if _, present := detached["domain"]; present {
+			return false, nil
+		}
+	case "oath-json-v1+oath-domain-sha256-v1":
+		domain, ok := detached["domain"].(string)
+		if !ok || domain == "" {
+			return false, nil
+		}
+		payloadDigest := sha256.Sum256(canonical)
+		preimage := bytes.NewBufferString("oath-domain-signature-v1\x00")
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len([]byte(domain))))
+		preimage.Write(length[:])
+		preimage.WriteString(domain)
+		preimage.Write(payloadDigest[:])
+		digest := sha256.Sum256(preimage.Bytes())
+		signed = digest[:]
+	default:
+		return false, nil
+	}
+	return ed25519.Verify(publicKey, signed, signature), nil
 }

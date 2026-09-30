@@ -368,6 +368,7 @@ pub fn verify_capsule(
             .as_str()
             .unwrap_or_default()
             .to_string(),
+        domain: assessment_signature["domain"].as_str().map(str::to_owned),
         signature: assessment_signature["signature"]
             .as_str()
             .unwrap_or_default()

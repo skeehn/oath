@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.dev/contracts/registry-replication-event-v1.schema.json",
+  "title": "RegistryReplicationEvent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_key", "source_region", "source_created_at", "object_digest", "checkpoint_root"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_key": {"type": "string", "minLength": 1},
+    "source_region": {"type": "string", "minLength": 1},
+    "source_created_at": {"type": "string", "format": "date-time"},
+    "object_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+    "checkpoint_root": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+  }
+}

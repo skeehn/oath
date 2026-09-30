@@ -1,0 +1,47 @@
+name: Qualification monitor
+
+on:
+  workflow_call:
+    inputs:
+      ledger_path:
+        description: Repository-relative path to the signed qualification ledger
+        required: true
+        type: string
+      max_age_hours:
+        description: Maximum age of the latest running-window observation
+        required: false
+        default: "36"
+        type: string
+  workflow_dispatch:
+    inputs:
+      ledger_path:
+        description: Repository-relative path to the signed qualification ledger
+        required: true
+        type: string
+      max_age_hours:
+        description: Maximum age of the latest running-window observation
+        required: false
+        default: "36"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.13.0
+      - name: Verify signed ledger and observation freshness
+        run: node scripts/monitor-qualification.mjs "$LEDGER_PATH" --max-age-hours "$MAX_AGE_HOURS" > qualification-monitor.json
+        env:
+          LEDGER_PATH: ${{ inputs.ledger_path }}
+          MAX_AGE_HOURS: ${{ inputs.max_age_hours }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: qualification-monitor
+          path: qualification-monitor.json

@@ -1,15 +1,18 @@
 # npm compatibility contract
 
-Oath targets workflow parity with npm 11 for install, ci, add/remove, run,
-exec, workspaces, lockfile import, registry authentication, peer dependencies,
-overrides, aliases, git/file/tarball dependencies, lifecycle behavior, and exit
-status. Registry administration commands are outside this contract.
+Oath targets workflow parity with npm 11 across the command, subcommand, flag,
+workspace, lockfile, registry authentication and administration, dependency,
+lifecycle, output-state, and exit-status surfaces declared in
+`contracts/npm-compatibility-manifest-v2.json`.
 
-`scripts/npm-parity.mjs` is the executable differential specification. It runs
-the same fixture in isolated temporary directories and emits a versioned JSON
-artifact containing the pinned npm version, command results, normalized
-`node_modules` trees, and equivalence decision. Differences are failures unless
-documented as intentional security divergences with a stable Oath reason code.
+`scripts/npm-parity.mjs` covers deep install materialization. The independent
+`scripts/compat-behavioral.mjs` suite covers install/ci workflow states, while
+`scripts/compat-command-surface.mjs` executes all 69 declared commands, seven
+npx/exec forms, and six workspace-filter forms for ci, add, remove, update,
+exec, pack, and publish: 118 command-surface cases in total. Each runs npm and Oath in isolated twins and
+records versions, arguments, command results, normalized state, authentication
+requests, and equivalence. Differences fail unless documented as intentional
+security or Oath-only product extensions with a stable manifest status.
 
 The semantic tree comparison follows package links and excludes npm's
 `.package-lock.json` plus Oath's `.oath` content-addressed implementation data.

@@ -2,7 +2,10 @@
 
 Oath decision contracts use Ed25519 over `oath-json-v1` bytes. The detached
 signature object carries the base64 public key, base64 signature, algorithm,
-and canonicalization version needed to reject unknown encodings.
+and canonicalization version needed to reject unknown encodings. Registry
+signatures may use `oath-json-v1+oath-domain-sha256-v1` plus a non-empty
+`domain`; verifiers hash the version tag, length-prefixed domain, and SHA-256
+payload digest before Ed25519 verification.
 
 To verify an `ExecAssessment v3`, `PublishAssessment v2`, or
 `RegistryVerdict v1`:
@@ -48,6 +51,30 @@ must be rejected instead of interpreted heuristically. Adding a reason code to
 an existing schema requires synchronized Rust, TypeScript, schema, example, and
 bundle-manifest changes; changing or removing a code requires a new schema
 version.
+
+## GA evidence contracts
+
+The bundle also publishes closed JSON Schemas for `CompatibilityEvidence v1`,
+`DetectionEvidenceReport v2`, `PerformanceEvidence v1` and v2,
+`OperationalDrillReport v2`, `ProductionDeploymentEvidence v1`,
+`TransparencyCheckpoint v3`, and `IndependentAuditReport v1`. These reports do
+not authorize package execution and are not signed agent verdicts. They are
+exact-commit inputs to the GA manifest, distributed with checksums and GitHub
+artifact provenance. Missing, stale, self-test, expired, incomplete, or
+threshold-failing reports remain open gates.
+
+PerformanceEvidence v1 remains immutable for existing consumers. Version 2 adds
+the verified warm no-op benchmark and per-install phase timings. The published
+npm compatibility manifest is the authoritative list of GA-required commands,
+semantics, implemented surfaces, preview surfaces, and intentional divergences.
+`RegistryReplicationEvent v1` defines the provider-neutral immutable
+event/object/checkpoint handoff for a future regional replicator; its presence
+does not claim that multi-region replication has been deployed or qualified.
+
+Two witness signatures are required for a qualifying transparency checkpoint;
+the registry's own checkpoint signature is not an independent witness. Audit
+reports bind the auditor's retained report and scope by digest without forcing
+private findings into the public bundle.
 
 Regenerate the deterministic examples and build the publication bundle with:
 

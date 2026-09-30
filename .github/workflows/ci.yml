@@ -47,7 +47,9 @@ jobs:
       - name: Test installed-tree evidence normalization
         run: node --test scripts/tree-evidence.test.mjs
       - name: Test GA evidence gate derivation
-        run: node --test scripts/generate-ga-evidence.test.mjs
+        run: |
+          node --test scripts/generate-ga-evidence.test.mjs
+          node -e "for (const path of require('fs').readdirSync('contracts').filter((path) => path.endsWith('.schema.json'))) JSON.parse(require('fs').readFileSync('contracts/' + path));"
       - name: Validate all pinned corpus lock artifacts
         run: node scripts/project-corpus.mjs validate tests/compat/projects.lock.json
       - name: Validate the real-project parity denominator
@@ -118,7 +120,7 @@ jobs:
             --secret-exfiltration tests/detection/self-test/secret-exfiltration \
             --metadata tests/detection/self-test/metadata.json \
             --qualification self-test > detection-gate-self-test.json
-          jq -e '.ga_gate.measurements_pass == true and .ga_gate.qualifies_for_ga == false' detection-gate-self-test.json
+          jq -e '.schema_version == 2 and .measurements_pass == true and .qualifies_for_ga == false' detection-gate-self-test.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: detection-gate-harness
@@ -137,9 +139,21 @@ jobs:
           node-version: 24.13.0
       - name: Test the 60-day evidence evaluator
         run: node scripts/validate-beta-ledger.mjs --self-test
+      - name: Test signed qualification ledgers and monitoring
+        run: |
+          node scripts/qualification-ledger.mjs --self-test
+          node scripts/monitor-qualification.mjs --self-test
+      - name: Install Linux containment dependency
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+      - name: Build Oath for internal containment review
+        run: cargo build --locked --bin oath
+      - name: Run internal containment and adversarial review
+        run: node scripts/run-internal-containment-review.mjs --output internal-containment-review.json
+        env:
+          OATH_BIN: target/debug/oath
       - name: Build exact-commit external audit inputs
         run: |
-          node scripts/build-audit-bundle.mjs audit-dist
+          node scripts/build-audit-bundle.mjs audit-dist --internal-review internal-containment-review.json
           (cd audit-dist && sha256sum --check SHA256SUMS)
           tar -czf oath-audit-inputs.tar.gz -C audit-dist .
           sha256sum oath-audit-inputs.tar.gz > oath-audit-inputs.tar.gz.sha256
@@ -157,33 +171,46 @@ jobs:
             oath-audit-inputs.tar.gz
             oath-audit-inputs.tar.gz.sha256
             audit-dist/
+            internal-containment-review.json
 
   independent-behavioral:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-15, windows-latest]
+        node: [22, 24]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24.13.0
+          node-version: ${{ matrix.node }}
       - run: npm install --global npm@11.12.1
-      - name: Install Linux sandbox linker dependency
+      - name: Install Linux sandbox runtime
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap libseccomp-dev
+      - name: Allow unprivileged user namespaces on the disposable runner
+        if: runner.os == 'Linux'
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - run: cargo build --locked --bin oath
       - name: Run independent npm behavior contract
         run: node scripts/compat-behavioral.mjs --execute
         env:
           OATH_BIN: ${{ runner.os == 'Windows' && 'target/debug/oath.exe' || 'target/debug/oath' }}
-          OATH_COMPAT_RESULTS: compat-results/behavioral-${{ runner.os }}
+          OATH_COMPAT_RESULTS: compat-results/behavioral-${{ runner.os }}/install-ci
+      - name: Run full npm command-surface contract
+        run: node scripts/compat-command-surface.mjs --execute
+        env:
+          OATH_BIN: ${{ runner.os == 'Windows' && 'target/debug/oath.exe' || 'target/debug/oath' }}
+          OATH_COMPAT_RESULTS: compat-results/behavioral-${{ runner.os }}/command-surface
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: compatibility-independent-behavioral-${{ runner.os }}
-          path: compat-results/behavioral-${{ runner.os }}/behavioral-summary.json
+          name: compatibility-independent-behavioral-${{ runner.os }}-node-${{ matrix.node }}
+          path: compat-results/behavioral-${{ runner.os }}/
 
   npm-reference-canary:
     continue-on-error: true
@@ -233,8 +260,18 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:8.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       OATH_TEST_DATABASE_URL: postgresql://oath:oath@localhost:5432/oath_test
+      OATH_TEST_REDIS_URL: redis://localhost:6379
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -242,6 +279,8 @@ jobs:
         run: rustup toolchain install stable && rustup default stable
       - name: PostgreSQL registry end-to-end test
         run: cargo test --locked -p oath-registry postgres_api::tests::live_postgres_enforces_tenants_publish_download_and_revoke -- --exact
+      - name: Redis rate-limit parity test
+        run: cargo test --locked -p oath-registry rate_limit::tests::live_redis_enforces_the_same_limit_boundary -- --exact
 
   registry-container:
     runs-on: ubuntu-latest
@@ -268,6 +307,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(docker image inspect oath-registry:ci --format '{{.Config.User}}')" = "10001:10001"
+          docker run --rm --network host \
+            --env DATABASE_URL=postgresql://oath:oath@127.0.0.1:5432/oath_container \
+            --read-only \
+            --tmpfs /tmp:size=64m,mode=1777 \
+            oath-registry:ci migrate
           container=$(docker run --detach --network host \
             --env DATABASE_URL=postgresql://oath:oath@127.0.0.1:5432/oath_container \
             --env OATH_PUBLIC_URL=http://127.0.0.1:4873 \
@@ -333,6 +377,10 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+        env:
+          # Windows' 1MB default thread stack overflows when tests parse the
+          # large Cli struct; match Linux's 8MB default.
+          RUST_MIN_STACK: ${{ runner.os == 'Windows' && '8388608' || '' }}
 
       - name: Release build
         run: cargo build --release --locked --bin oath
@@ -774,6 +822,8 @@ jobs:
         with:
           name: oath-agent-contracts
           path: evidence-download/contracts
+      - name: Aggregate exact-commit npm/npx compatibility evidence
+        run: node scripts/aggregate-compatibility-evidence.mjs evidence-download/behavioral evidence-download/compatibility/compatibility-evidence-v1.json
       - run: node scripts/generate-ga-evidence.mjs evidence-download ga-evidence-manifest.json
       - run: sha256sum ga-evidence-manifest.json > ga-evidence-manifest.json.sha256
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8

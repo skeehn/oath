@@ -101,14 +101,9 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(unix)]
 fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(target, link)
+    oath_resolve::placement::link_package_binary(target, link)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 /// Links resolved packages into a project's node_modules
@@ -1168,6 +1163,7 @@ mod tests {
             integrity: None,
             dev: false,
             optional: false,
+            peer: false,
             has_install_script: false,
             reuse_existing: false,
             link: false,
@@ -1222,6 +1218,7 @@ mod tests {
                 integrity: None,
                 dev: false,
                 optional: false,
+                peer: false,
                 has_install_script: false,
                 reuse_existing: false,
                 link: true,
@@ -1351,6 +1348,7 @@ mod tests {
             integrity: None,
             dev: false,
             optional: false,
+            peer: false,
             has_install_script: false,
             reuse_existing,
             link: false,
@@ -1442,6 +1440,7 @@ mod tests {
                 integrity: None,
                 dev: false,
                 optional: false,
+                peer: false,
                 has_install_script: false,
                 reuse_existing: true,
                 link: false,

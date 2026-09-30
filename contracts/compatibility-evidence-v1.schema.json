@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oath.sh/schemas/compatibility-evidence-v1.json",
+  "title": "Oath CompatibilityEvidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_type", "generated_at", "release_commit", "reference", "platforms", "node_versions", "commands", "intentional_exceptions", "summary", "qualifies_for_cli_ga"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_type": { "const": "CompatibilityEvidence" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "release_commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["npm_version", "manifest_version"],
+      "properties": {
+        "npm_version": { "type": "string", "minLength": 1 },
+        "manifest_version": { "const": 1 }
+      }
+    },
+    "platforms": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["linux", "darwin", "win32"] } },
+    "node_versions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "commands": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/command_result" } },
+    "intentional_exceptions": { "type": "array", "items": { "$ref": "#/$defs/exception" } },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executed", "equivalent", "failed", "exceptions"],
+      "properties": {
+        "executed": { "type": "integer", "minimum": 1 },
+        "equivalent": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "exceptions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "qualifies_for_cli_ga": { "type": "boolean" }
+  },
+  "$defs": {
+    "digest": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+    "command_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "command", "args", "platform", "node_version", "npm_exit_code", "oath_exit_code", "npm_tree_digest", "oath_tree_digest", "equivalent", "reason"],
+      "properties": {
+        "case": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "platform": { "enum": ["linux", "darwin", "win32"] },
+        "node_version": { "type": "string", "minLength": 1 },
+        "npm_exit_code": { "type": ["integer", "null"] },
+        "oath_exit_code": { "type": ["integer", "null"] },
+        "npm_tree_digest": { "$ref": "#/$defs/digest" },
+        "oath_tree_digest": { "$ref": "#/$defs/digest" },
+        "equivalent": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "surface", "behavior", "rationale"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "surface": { "type": "string", "minLength": 1 },
+        "behavior": { "enum": ["unsupported", "security_divergence", "deferred"] },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

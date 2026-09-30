@@ -1,6 +1,7 @@
 import base64
 import copy
 import json
+import hashlib
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -35,8 +36,6 @@ def verify_signed_document(document: dict[str, Any]) -> bool:
         return False
     if detached.get("algorithm") != "ed25519":
         return False
-    if detached.get("canonicalization") != "oath-json-v1":
-        return False
     try:
         public_key = base64.b64decode(detached["public_key"], validate=True)
         signature = base64.b64decode(detached["signature"], validate=True)
@@ -44,9 +43,21 @@ def verify_signed_document(document: dict[str, Any]) -> bool:
             return False
         payload = copy.deepcopy(document)
         payload["signature"] = None
-        Ed25519PublicKey.from_public_bytes(public_key).verify(
-            signature, canonical_json(payload)
-        )
+        signed = canonical_json(payload)
+        if detached.get("canonicalization") == "oath-json-v1+oath-domain-sha256-v1":
+            domain = detached.get("domain")
+            if not isinstance(domain, str) or not domain:
+                return False
+            domain_bytes = domain.encode("utf-8")
+            signed = hashlib.sha256(
+                b"oath-domain-signature-v1\0"
+                + len(domain_bytes).to_bytes(8, "big")
+                + domain_bytes
+                + hashlib.sha256(signed).digest()
+            ).digest()
+        elif detached.get("canonicalization") != "oath-json-v1" or "domain" in detached:
+            return False
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, signed)
         return True
     except (InvalidSignature, KeyError, TypeError, ValueError):
         return False

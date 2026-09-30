@@ -8,6 +8,7 @@ const REQUIRED_DRILLS = [
   "object_corruption",
   "process_kill",
   "regional_failover",
+  "revocation_cache_outage",
   "split_view",
   "tenant_isolation",
   "webhook_replay",
@@ -64,6 +65,9 @@ function validate(ledger) {
     if (!drill) errors.push(`missing passed drill: ${type}`);
     else if (!isoDate(drill.date) || !/^[0-9a-f]{64}$/.test(drill.evidence_sha256 ?? "")) {
       errors.push(`drill ${type} has invalid date or evidence checksum`);
+    } else if (!Array.isArray(drill.assertions) || drill.assertions.length === 0 ||
+      drill.assertions.some((assertion) => assertion?.passed !== true)) {
+      errors.push(`drill ${type} has missing or failed assertions`);
     }
   }
   const restore = drills.find((drill) => drill?.type === "backup_restore");
@@ -81,6 +85,7 @@ function validate(ledger) {
   return {
     schema_version: 1,
     evidence_class: "beta-ledger-validation",
+    release_commit: ledger?.release_commit ?? null,
     observed_days: days.length,
     consecutive_days: errors.every((error) => !error.includes("not consecutive")),
     required_drills: REQUIRED_DRILLS.length,
@@ -115,6 +120,7 @@ function selfTestLedger() {
       date: "2030-02-01",
       status: "passed",
       evidence_sha256: checksum,
+      assertions: [{ name: `${type}_safety_invariant`, passed: true }],
       ...(type === "backup_restore" ? { rpo_minutes: 5, rto_minutes: 60 } : {}),
     })),
     independent_audits: REQUIRED_AUDITS.map((type) => ({

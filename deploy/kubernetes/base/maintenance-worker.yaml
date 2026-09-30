@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oath-maintenance-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: oath-maintenance-worker}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: oath-maintenance-worker}
+    spec:
+      serviceAccountName: oath-registry
+      securityContext:
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: wait-for-migrations
+          image: oath-registry:local
+          imagePullPolicy: IfNotPresent
+          args: ["wait-for-migrations"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: oath-registry-secrets, key: worker-database-url}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+      containers:
+        - name: maintenance-worker
+          image: oath-registry:local
+          args: ["maintenance-worker"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: oath-registry-secrets, key: worker-database-url}
+            - {name: OATH_DATABASE_ROLE, value: oath_worker}
+            - {name: OATH_OBJECT_BACKEND, value: local}
+            - {name: OATH_ANALYZER_BACKEND, value: inline}
+            - {name: OATH_REGISTRY_RATE_LIMIT_BACKEND, value: postgres}
+            - {name: OATH_REGISTRY_SIGNER, value: file}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/oath-registry}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: oath-registry-data}

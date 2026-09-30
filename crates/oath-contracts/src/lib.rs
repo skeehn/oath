@@ -99,6 +99,8 @@ impl std::fmt::Display for ReasonCode {
 pub struct DetachedSignature {
     pub algorithm: String,
     pub canonicalization: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     pub public_key: String,
     pub signature: String,
 }
@@ -310,6 +312,7 @@ pub fn sign_json(
     Ok(DetachedSignature {
         algorithm: "ed25519".into(),
         canonicalization: "oath-json-v1".into(),
+        domain: None,
         public_key: base64::engine::general_purpose::STANDARD
             .encode(key.verifying_key().to_bytes()),
         signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
@@ -325,11 +328,26 @@ pub fn verify_json(
             detached.algorithm.clone(),
         ));
     }
-    if detached.canonicalization != "oath-json-v1" {
-        return Err(ContractError::UnsupportedCanonicalization(
-            detached.canonicalization.clone(),
-        ));
-    }
+    let canonical = canonical_json_bytes(value)?;
+    let signed = match detached.canonicalization.as_str() {
+        "oath-json-v1" if detached.domain.is_none() => canonical,
+        "oath-json-v1+oath-domain-sha256-v1" => domain_separated_digest(
+            detached
+                .domain
+                .as_deref()
+                .filter(|domain| !domain.is_empty())
+                .ok_or_else(|| {
+                    ContractError::UnsupportedCanonicalization(detached.canonicalization.clone())
+                })?,
+            &canonical,
+        )
+        .to_vec(),
+        _ => {
+            return Err(ContractError::UnsupportedCanonicalization(
+                detached.canonicalization.clone(),
+            ));
+        }
+    };
     let key: [u8; 32] = base64::engine::general_purpose::STANDARD
         .decode(&detached.public_key)?
         .try_into()
@@ -340,11 +358,19 @@ pub fn verify_json(
         .map_err(|_| ContractError::InvalidSignature)?;
     VerifyingKey::from_bytes(&key)
         .map_err(|_| ContractError::InvalidPublicKey)?
-        .verify(
-            &canonical_json_bytes(value)?,
-            &Signature::from_bytes(&signature),
-        )
+        .verify(&signed, &Signature::from_bytes(&signature))
         .map_err(|_| ContractError::InvalidSignature)
+}
+
+pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut hash = Sha256::new();
+    hash.update(b"oath-domain-signature-v1\0");
+    hash.update((domain.len() as u64).to_be_bytes());
+    hash.update(domain.as_bytes());
+    hash.update(Sha256::digest(payload));
+    hash.finalize().into()
 }
 
 pub fn verify_exec_assessment(value: &ExecAssessmentV3) -> Result<(), ContractError> {

@@ -8,7 +8,10 @@ Before applying the base:
 
 1. Build `deploy/Dockerfile` for the target architectures and replace
    `oath-registry:local` with an immutable image digest.
-2. Create `oath-registry-secrets` with a `database-url` key.
+2. Create `oath-registry-secrets` with `database-url`,
+   `worker-database-url`, `migration-database-url`, and `analyzer-token` keys.
+   The three database credentials must be distinct: schema owner for migration,
+   `oath_api` membership for the API, and `oath_worker` membership for workers.
 3. Create `oath-registry-config` with `public-url`, `object-backend`, and
    `object-bucket` keys. Supported remote backends are `s3`, `r2`, `gcs`, and
    `azure`.
@@ -23,7 +26,8 @@ kubectl kustomize deploy/kubernetes/base
 kubectl apply --server-side --dry-run=server -k deploy/kubernetes/base
 ```
 
-The beta signing key is file-backed, so this base intentionally runs one
-replica. Do not scale it until every replica mounts the same protected key or a
-remote signing provider is configured. TLS and external rate limits belong at
-the ingress or service-mesh boundary.
+The base defaults to file signing and PostgreSQL rate limiting. Do not scale the
+signing path until every replica mounts the same protected key or a compatible
+remote signer is configured. Redis and remote signing are runtime selections;
+the base intentionally creates neither provider. TLS and network policy belong
+at the ingress or service-mesh boundary.
