@@ -179,9 +179,17 @@ function phaseRegressionGate(benchmarks, config) {
   }
   const baselineP95 = phaseP95ByPhase(baseline?.benchmarks?.warm_install?.tools?.oath?.raw_samples);
   const currentP95 = phaseP95ByPhase(benchmarks?.warm_install?.tools?.oath?.raw_samples);
-  const phases = Object.keys(baselineP95).filter(
-    (phase) => baselineP95[phase] > 0 && typeof currentP95[phase] === "number",
-  );
+  const baselinePhases = Object.keys(baselineP95).filter((phase) => baselineP95[phase] > 0);
+  const missing = baselinePhases.filter((phase) => typeof currentP95[phase] !== "number");
+  if (missing.length > 0) {
+    return insufficient(
+      name,
+      [`current run lacks baseline phases: ${missing.join(", ")}`],
+      null,
+      requirement,
+    );
+  }
+  const phases = baselinePhases;
   if (phases.length === 0) {
     return insufficient(
       name,

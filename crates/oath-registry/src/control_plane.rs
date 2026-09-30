@@ -683,24 +683,35 @@ impl PostgresControlPlane {
             role: row.get("role"),
             expires_at: row.get("expires_at"),
         };
-        // Lock the invitation row so concurrent accepts serialize; the guarded
-        // UPDATE below then guarantees exactly one winner.
-        query("SELECT 1 FROM invitations WHERE token_hash=$1 FOR UPDATE")
+        // Set the tenant BEFORE locking: the invitations RLS policy filters on the
+        // tenant setting, so a FOR UPDATE issued before set_tenant sees no row
+        // and acquires no lock.
+        set_tenant(&mut tx, &invitation.organization).await?;
+        // Lock the invitation row so concurrent accepts/revokes serialize; the
+        // guarded UPDATE below then guarantees exactly one winner.
+        let locked = query("SELECT 1 FROM invitations WHERE token_hash=$1 FOR UPDATE")
             .bind(token_hash)
             .fetch_optional(&mut *tx)
             .await?;
-        set_tenant(&mut tx, &invitation.organization).await?;
+        if locked.is_none() {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         if !invitation.email.eq_ignore_ascii_case(email) {
             tx.rollback().await?;
             anyhow::bail!("invitation email does not match verified identity");
         }
         query("INSERT INTO organization_members(organization,subject,email,role,created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization,subject) DO UPDATE SET email=EXCLUDED.email,role=EXCLUDED.role")
             .bind(&invitation.organization).bind(subject).bind(email).bind(&invitation.role).bind(crate::now() as i64).execute(&mut *tx).await?;
+        // Re-check revocation and expiry in the guarded UPDATE so a revoke (or
+        // expiry) that lands between the lookup and this statement is honored.
+        let now = crate::now() as i64;
         let accepted = query(
-            "UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1 AND accepted_at IS NULL",
+            "UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $3",
         )
         .bind(token_hash)
-        .bind(crate::now() as i64)
+        .bind(now)
+        .bind(now)
         .execute(&mut *tx)
         .await?
         .rows_affected()
