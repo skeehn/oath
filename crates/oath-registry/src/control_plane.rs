@@ -92,8 +92,7 @@ impl PostgresControlPlane {
                                     format!(
                                         "SET ROLE {role} failed ({error:#}): the database login user must be a \
                                          member of the role (as superuser: GRANT {role} TO <login_user>;)"
-                                    )
-                                    .into(),
+                                    ),
                                 )
                             })?;
                     }
