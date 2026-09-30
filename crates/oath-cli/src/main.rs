@@ -1332,8 +1332,26 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The Cli struct is large; Windows' 1MB default main-thread stack overflows
+    // during argument parsing. Run the async main on a thread with an 8MB stack
+    // (matching Linux's default) so CLI parsing has room.
+    std::thread::Builder::new()
+        .name("oath-main".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime")
+                .block_on(async_main())
+        })
+        .expect("failed to spawn oath main thread")
+        .join()
+        .expect("oath main thread panicked")
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .without_time()
