@@ -1343,15 +1343,15 @@ async function runExecForm(form) {
         break;
       case "package-single":
         npmArgs = ["exec", "--package", "semver@7.7.3", "--", "semver", "1.2.3"];
-        oathArgs = ["exec", "--package", "semver@7.7.3", "semver", "1.2.3"];
+        oathArgs = ["exec", "--package", "semver@7.7.3", "--allow-uncontained", "semver", "1.2.3"];
         break;
       case "package-repeat":
         npmArgs = ["exec", "--package", "semver@7.7.3", "--package", "is-number@7.0.0", "--", "semver", "1.2.3"];
-        oathArgs = ["exec", "--package", "semver@7.7.3", "--package", "is-number@7.0.0", "semver", "1.2.3"];
+        oathArgs = ["exec", "--package", "semver@7.7.3", "--package", "is-number@7.0.0", "--allow-uncontained", "semver", "1.2.3"];
         break;
       case "call":
         npmArgs = ["exec", "--package", "semver@7.7.3", "--call", "semver 1.2.3"];
-        oathArgs = ["exec", "--package", "semver@7.7.3", "--call", "semver 1.2.3"];
+        oathArgs = ["exec", "--package", "semver@7.7.3", "--allow-uncontained", "--call", "semver 1.2.3"];
         break;
       case "interactive":
         npmArgs = ["exec", "--yes"];
