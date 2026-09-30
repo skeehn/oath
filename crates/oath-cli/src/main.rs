@@ -14860,66 +14860,75 @@ mod tests {
 
     #[test]
     fn global_and_dedupe_compatibility_flags_parse() {
-        for command in [
-            &["oath", "remove", "fixture", "--global"][..],
-            &["oath", "update", "fixture", "--global"][..],
-            &["oath", "outdated", "--global", "--json"][..],
-            &["oath", "dedupe", "--prefer-dedupe", "--dry-run"][..],
-            &["oath", "install", "--package-lock-only"][..],
-            &["oath", "install", "--lockfile-only"][..],
-            &["oath", "audit", "--fix", "--dry-run", "--json"][..],
-            &["oath", "audit", "signatures", "--json"][..],
-            &[
-                "oath",
-                "profile",
-                "enable-2fa",
-                "auth-and-writes",
-                "--password-stdin",
-                "--otp",
-                "123456",
-            ][..],
-            &[
-                "oath",
-                "profile",
-                "disable-2fa",
-                "--password-stdin",
-                "--otp",
-                "123456",
-            ][..],
-            &[
-                "oath",
-                "prune",
-                "extraneous",
-                "--ignore-scripts",
-                "--omit",
-                "optional",
-                "--dry-run",
-                "-w",
-                "pkg",
-            ][..],
-            &["oath", "cache", "npx", "ls", "--json"][..],
-            &[
-                "oath",
-                "cache",
-                "npx",
-                "info",
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                "--json",
-            ][..],
-            &[
-                "oath",
-                "cache",
-                "npx",
-                "rm",
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            ][..],
-            &["oath", "publish", "--dry-run", "--otp", "123456"][..],
-            &["oath", "publish", "--provenance", "--access", "public"][..],
-            &["oath", "publish", "--provenance-file", "bundle.sigstore"][..],
-        ] {
-            Cli::try_parse_from(command)
-                .unwrap_or_else(|error| panic!("failed to parse {command:?}: {error}"));
-        }
+        // The Cli struct is large; Windows' 1MB default test-thread stack
+        // overflows during parsing. Run with an 8MB stack (Linux default).
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                for command in [
+                    &["oath", "remove", "fixture", "--global"][..],
+                    &["oath", "update", "fixture", "--global"][..],
+                    &["oath", "outdated", "--global", "--json"][..],
+                    &["oath", "dedupe", "--prefer-dedupe", "--dry-run"][..],
+                    &["oath", "install", "--package-lock-only"][..],
+                    &["oath", "install", "--lockfile-only"][..],
+                    &["oath", "audit", "--fix", "--dry-run", "--json"][..],
+                    &["oath", "audit", "signatures", "--json"][..],
+                    &[
+                        "oath",
+                        "profile",
+                        "enable-2fa",
+                        "auth-and-writes",
+                        "--password-stdin",
+                        "--otp",
+                        "123456",
+                    ][..],
+                    &[
+                        "oath",
+                        "profile",
+                        "disable-2fa",
+                        "--password-stdin",
+                        "--otp",
+                        "123456",
+                    ][..],
+                    &[
+                        "oath",
+                        "prune",
+                        "extraneous",
+                        "--ignore-scripts",
+                        "--omit",
+                        "optional",
+                        "--dry-run",
+                        "-w",
+                        "pkg",
+                    ][..],
+                    &["oath", "cache", "npx", "ls", "--json"][..],
+                    &[
+                        "oath",
+                        "cache",
+                        "npx",
+                        "info",
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "--json",
+                    ][..],
+                    &[
+                        "oath",
+                        "cache",
+                        "npx",
+                        "rm",
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    ][..],
+                    &["oath", "publish", "--dry-run", "--otp", "123456"][..],
+                    &["oath", "publish", "--provenance", "--access", "public"][..],
+                    &["oath", "publish", "--provenance-file", "bundle.sigstore"][..],
+                ] {
+                    Cli::try_parse_from(command)
+                        .unwrap_or_else(|error| panic!("failed to parse {command:?}: {error}"));
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -14963,33 +14972,42 @@ mod tests {
 
     #[test]
     fn exec_defaults_to_fail_closed_auto_containment() {
-        let cli = Cli::try_parse_from(["oath", "exec", "eslint", "--dry-run"]).unwrap();
-        let Commands::Exec {
-            sandbox_mode,
-            allow_uncontained,
-            ..
-        } = cli.command
-        else {
-            panic!("expected exec command");
-        };
-        assert_eq!(sandbox_mode, ExecSandboxMode::Auto);
-        assert!(!allow_uncontained);
+        // The Cli struct is large; Windows' 1MB default test-thread stack
+        // overflows during parsing. Run with an 8MB stack (Linux default).
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = Cli::try_parse_from(["oath", "exec", "eslint", "--dry-run"]).unwrap();
+                let Commands::Exec {
+                    sandbox_mode,
+                    allow_uncontained,
+                    ..
+                } = cli.command
+                else {
+                    panic!("expected exec command");
+                };
+                assert_eq!(sandbox_mode, ExecSandboxMode::Auto);
+                assert!(!allow_uncontained);
 
-        let interactive = Cli::try_parse_from(["oath", "exec"]).unwrap();
-        let Commands::Exec {
-            package,
-            packages,
-            call,
-            sandbox_mode,
-            allow_uncontained,
-            ..
-        } = interactive.command
-        else {
-            panic!("expected interactive exec command");
-        };
-        assert!(package.is_none() && packages.is_empty() && call.is_none());
-        assert_eq!(sandbox_mode, ExecSandboxMode::Auto);
-        assert!(!allow_uncontained);
+                let interactive = Cli::try_parse_from(["oath", "exec"]).unwrap();
+                let Commands::Exec {
+                    package,
+                    packages,
+                    call,
+                    sandbox_mode,
+                    allow_uncontained,
+                    ..
+                } = interactive.command
+                else {
+                    panic!("expected interactive exec command");
+                };
+                assert!(package.is_none() && packages.is_empty() && call.is_none());
+                assert_eq!(sandbox_mode, ExecSandboxMode::Auto);
+                assert!(!allow_uncontained);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
