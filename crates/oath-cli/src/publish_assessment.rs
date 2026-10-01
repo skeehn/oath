@@ -156,10 +156,7 @@ fn publish_assessment_root(root: &Path) -> Result<PathBuf> {
     let canonical = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize package root {}", root.display()))?;
-    let project_id = format!(
-        "{:x}",
-        Sha256::digest(canonical.to_string_lossy().as_bytes())
-    );
+    let project_id = hex::encode(Sha256::digest(canonical.to_string_lossy().as_bytes()));
     Ok(home
         .join(".oath")
         .join("publish-assessments")
@@ -294,7 +291,7 @@ fn assess_with_signing_key(
             .unwrap_or(file)
             .to_string_lossy()
             .replace('\\', "/");
-        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let digest = hex::encode(Sha256::digest(&bytes));
         contents.push(bytes.clone());
         total += bytes.len() as u64;
         if looks_sensitive_path(&rel) {
@@ -366,7 +363,7 @@ fn assess_with_signing_key(
         version: version.into(),
         tag: tag.into(),
         access: access.map(String::from),
-        package_digest: format!("sha256:{:x}", package_hasher.finalize()),
+        package_digest: format!("sha256:{}", hex::encode(package_hasher.finalize())),
         unpacked_bytes: total,
         files: manifest,
         dependency_count,
