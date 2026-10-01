@@ -249,8 +249,8 @@ pub enum ContractError {
 
 pub fn digest_json(value: &impl Serialize) -> Result<String, serde_json::Error> {
     Ok(format!(
-        "sha256:{:x}",
-        Sha256::digest(canonical_json_bytes(value)?)
+        "sha256:{}",
+        hex::encode(Sha256::digest(canonical_json_bytes(value)?))
     ))
 }
 

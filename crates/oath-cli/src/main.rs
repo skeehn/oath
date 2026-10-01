@@ -4742,7 +4742,7 @@ async fn cmd_publish(
     let shasum = {
         let mut hasher = Sha1::new();
         hasher.update(&tarball_bytes);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     };
 
     let tarball_b64 = base64::engine::general_purpose::STANDARD.encode(&tarball_bytes);
