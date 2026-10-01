@@ -70,15 +70,29 @@ fn npm_command() -> std::process::Command {
 fn sha256_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(path)?;
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn sha512_file(path: &Path) -> Result<String> {
     let mut hasher = Sha512::new();
     let mut file = std::fs::File::open(path)?;
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(format!("sha512:{:x}", hasher.finalize()))
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("sha512:{}", hex::encode(hasher.finalize())))
 }
 
 fn pack_without_scripts(root: &Path, destination: &Path) -> Result<PathBuf> {
@@ -156,7 +170,7 @@ fn verify_tarball_matches_assessment(tarball: &Path, assessment: &PublishAssessm
             "tarball byte length changed after assessment for {relative}"
         );
         anyhow::ensure!(
-            format!("{:x}", Sha256::digest(&bytes)) == expected_file.sha256,
+            hex::encode(Sha256::digest(&bytes)) == expected_file.sha256,
             "tarball bytes changed after assessment for {relative}"
         );
     }

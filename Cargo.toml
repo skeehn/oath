@@ -31,8 +31,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Crypto / integrity
-sha2 = "0.10"
-sha1 = "0.10"
+sha2 = "0.11"
+sha1 = "0.11"
 blake3 = "1"
 ed25519-dalek = "2"
 getrandom = "0.4"
@@ -44,7 +44,7 @@ object_store = { git = "https://github.com/apache/arrow-rs-object-store", rev = 
 # AWS-LC provides the same OIDC verification algorithms without pulling the
 # unfixed RustCrypto RSA timing-side-channel dependency.
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
-hmac = "0.12"
+hmac = "0.13"
 hex = "0.4"
 
 # HTTP -- rustls-tls (not native-tls/OpenSSL) so Linux cross-compiles need no system OpenSSL
