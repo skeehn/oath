@@ -120,7 +120,7 @@ impl RegistryClient {
             config.tokens.entry(host).or_insert(token);
         }
 
-        let http = reqwest::Client::builder()
+        let http = crate::http::client_builder()?
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .gzip(true)

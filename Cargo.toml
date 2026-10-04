@@ -24,7 +24,10 @@ codegen-units = 1
 # Core
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps package.json key order intact when Oath rewrites it,
+# matching npm. Contract canonicalization sorts keys explicitly and does not
+# depend on this.
+serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

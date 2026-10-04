@@ -9,7 +9,7 @@ Use Oath as a decision boundary before running unfamiliar JavaScript package cod
 
 ## Required workflow
 
-1. Run `oath exec <package> --dry-run --json --deny-network --sandbox-mode auto`.
+1. Run `oath exec --dry-run --json --deny-network --sandbox-mode auto <package>`. Oath's own flags go before the package name; anything after it is passed to the package, exactly as with `npx`.
 2. Read the JSON `assessment`, `decision`, exact integrity, capabilities, limitations, and selected sandbox backend.
 3. Abstain when the command fails, the JSON is missing, the integrity is absent, the policy denies execution, or the requested grade is not met.
 4. Present the package identity, integrity, evidence, requested capabilities, granted capabilities, sandbox backend, degraded reason, and unresolved limitations to the user.

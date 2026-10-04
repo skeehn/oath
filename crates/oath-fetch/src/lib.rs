@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod http;
 pub mod metadata;
 pub mod npmrc;
 pub mod packument;

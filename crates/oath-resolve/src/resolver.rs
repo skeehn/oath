@@ -194,10 +194,13 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(client: RegistryClient, options: ResolveOptions) -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent("oath-pm")
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
+        let http = oath_fetch::http::client_builder()
+            .and_then(|builder| {
+                builder
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()
+                    .map_err(Into::into)
+            })
             .expect("failed to build reqwest client");
         Self {
             client,

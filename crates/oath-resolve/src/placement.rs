@@ -25,6 +25,76 @@ pub struct PlacementPlan {
     #[serde(default)]
     pub removed_locations: Vec<String>,
     pub invalid_edges: Vec<PlacementEdge>,
+    /// The dependency fields npm would write to the root package.json after an
+    /// add or remove request. Absent for plain install, ci, and update plans,
+    /// which never rewrite package.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_manifest: Option<RootManifest>,
+}
+
+/// Root package.json dependency sections as npm's `saveIdealTree` would save
+/// them: alphabetically ordered, with empty sections removed (`None`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RootManifest {
+    #[serde(default)]
+    pub dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "devDependencies")]
+    pub dev_dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "optionalDependencies")]
+    pub optional_dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "peerDependencies")]
+    pub peer_dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl RootManifest {
+    /// Apply the saved dependency sections to a parsed package.json, replacing
+    /// each section npm would have written and deleting sections npm would
+    /// have pruned. Every other key keeps its position and value.
+    pub fn apply_to(&self, manifest: &mut serde_json::Value) {
+        let Some(object) = manifest.as_object_mut() else {
+            return;
+        };
+        for (key, section) in [
+            ("dependencies", &self.dependencies),
+            ("devDependencies", &self.dev_dependencies),
+            ("optionalDependencies", &self.optional_dependencies),
+            ("peerDependencies", &self.peer_dependencies),
+        ] {
+            match section {
+                Some(map) => {
+                    object.insert(key.to_string(), serde_json::Value::Object(map.clone()));
+                }
+                None => {
+                    // `remove` on an order-preserving map is a swap-remove and
+                    // would move the last key into this slot; keep the order.
+                    object.shift_remove(key);
+                }
+            }
+        }
+    }
+
+    /// The root `dependencies` and `devDependencies` as plain name/spec maps,
+    /// used for the lockfile's manifest snapshot.
+    pub fn snapshot(
+        &self,
+    ) -> (
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    ) {
+        let to_map = |section: &Option<serde_json::Map<String, serde_json::Value>>| {
+            section
+                .as_ref()
+                .map(|map| {
+                    map.iter()
+                        .map(|(name, spec)| {
+                            (name.clone(), spec.as_str().unwrap_or("*").to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        (to_map(&self.dependencies), to_map(&self.dev_dependencies))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +516,39 @@ fn validate_locations(plan: &PlacementPlan) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_manifest_apply_keeps_remaining_key_order_when_pruning_a_section() {
+        let mut manifest = serde_json::json!({
+            "name": "demo",
+            "dependencies": { "is-number": "^7.0.0" },
+            "scripts": { "test": "node test.js" },
+            "license": "UNLICENSED"
+        });
+        let saved = RootManifest {
+            dependencies: None,
+            dev_dependencies: Some(
+                serde_json::json!({ "typescript": "^5.0.0" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ),
+            optional_dependencies: None,
+            peer_dependencies: None,
+        };
+        saved.apply_to(&mut manifest);
+        let keys: Vec<&str> = manifest
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["name", "scripts", "license", "devDependencies"],
+            "pruned section must not reorder the keys that follow it"
+        );
+    }
     #[test]
     fn rejects_traversal_locations() {
         let plan = PlacementPlan {
@@ -472,6 +575,7 @@ mod tests {
             }],
             removed_locations: vec![],
             invalid_edges: vec![],
+            root_manifest: None,
         };
         assert!(validate_locations(&plan).is_err());
     }
