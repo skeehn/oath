@@ -70,6 +70,19 @@ pub fn run(
     program: &std::path::Path,
     args: &[String],
 ) -> anyhow::Result<ExitStatus> {
+    run_with_env(plan, program, args, &[])
+}
+
+/// Like [`run`], but also sets `extra_env` inside the namespace. Extra
+/// variables are explicit values the caller computed (for example the PATH
+/// and `npm_*` variables of an exec), not names read from the host
+/// environment, so the plan's allowlist still governs what leaks in.
+pub fn run_with_env(
+    plan: &SandboxPlan,
+    program: &std::path::Path,
+    args: &[String],
+    extra_env: &[(String, String)],
+) -> anyhow::Result<ExitStatus> {
     let bwrap = bubblewrap().ok_or_else(|| {
         anyhow::anyhow!(
             "native Linux sandbox unavailable: install bubblewrap; Oath will not silently fall back"
@@ -117,6 +130,9 @@ pub fn run(
         if let Ok(value) = std::env::var(name) {
             cmd.args(["--setenv", name, &value]);
         }
+    }
+    for (name, value) in extra_env {
+        cmd.args(["--setenv", name, value]);
     }
     let limits = plan.limits.clone();
     let nproc_limit = current_user_process_count().saturating_add(limits.max_processes);
@@ -193,24 +209,32 @@ fn apply_landlock(plan: &SandboxPlan) -> anyhow::Result<()> {
         .handle_access(AccessFs::from_all(abi))?
         .scope(Scope::from_all(abi))?
         .create()?;
+    // A rule on a regular file (the Node binary granted by canonical path, a
+    // bin script) may only carry file-applicable rights: directory rights
+    // such as ReadDir on a file make the kernel reject the rule, which the
+    // landlock crate reports as a partially enforced ruleset.
     for path in ["/usr", "/bin", "/lib", "/lib64"]
         .into_iter()
         .map(std::path::PathBuf::from)
         .chain(plan.read_only_paths.iter().cloned())
     {
         if path.exists() {
-            ruleset = ruleset.add_rule(PathBeneath::new(
-                PathFd::new(path)?,
-                AccessFs::from_read(abi),
-            ))?;
+            let access = if path.is_dir() {
+                AccessFs::from_read(abi)
+            } else {
+                AccessFs::from_read(abi) & AccessFs::from_file(abi)
+            };
+            ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(path)?, access))?;
         }
     }
     for path in &plan.writable_paths {
         if path.exists() {
-            ruleset = ruleset.add_rule(PathBeneath::new(
-                PathFd::new(path)?,
-                AccessFs::from_all(abi),
-            ))?;
+            let access = if path.is_dir() {
+                AccessFs::from_all(abi)
+            } else {
+                AccessFs::from_all(abi) & AccessFs::from_file(abi)
+            };
+            ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(path)?, access))?;
         }
     }
     let status = ruleset.restrict_self()?;
@@ -299,6 +323,56 @@ fn apply_seccomp(plan: &SandboxPlan) -> anyhow::Result<()> {
         "fchdir",
         "getdents64",
         "mkdirat",
+        // Legacy (non-*at) forms of the path syscalls above: libuv and glibc
+        // still issue them on x86_64, and every one is covered by the same
+        // Landlock rules as its *at equivalent, so allowing them adds no
+        // capability.
+        "mkdir",
+        "rmdir",
+        "unlink",
+        "rename",
+        "open",
+        "creat",
+        "stat",
+        "lstat",
+        "symlink",
+        "link",
+        "chmod",
+        "fchmod",
+        "fchmodat",
+        "fchmodat2",
+        "chown",
+        "fchown",
+        "fchownat",
+        "lchown",
+        "utimensat",
+        "futimesat",
+        "truncate",
+        "flock",
+        "fallocate",
+        "fadvise64",
+        "copy_file_range",
+        "sendfile",
+        "statfs",
+        "fstatfs",
+        "getdents",
+        "umask",
+        "msync",
+        "mincore",
+        "memfd_create",
+        "inotify_init",
+        "inotify_init1",
+        "inotify_add_watch",
+        "inotify_rm_watch",
+        "epoll_pwait2",
+        "clock_getres",
+        "rt_sigtimedwait",
+        "getrusage",
+        "times",
+        "getpgid",
+        "getpgrp",
+        "setpgid",
+        "setsid",
         "unlinkat",
         "renameat2",
         "linkat",

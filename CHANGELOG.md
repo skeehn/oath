@@ -5,6 +5,62 @@ All notable changes to oath are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- `oath x` is a full `npx` and `bunx` replacement. It resolves a command in
+  libnpmexec's order (project bin, walk-up `node_modules/.bin`, global bin,
+  package spec), accepts repeatable `--package`/`-p` and `--call`/`-c`,
+  picks the bin with npm's `getBinFromManifest` rule, runs non-JavaScript
+  bins through their shebang interpreter, and accepts git, directory, and
+  tarball specs as well as registry names, tags, versions, and ranges.
+- A persistent exec cache at `~/.oath/cache/_npx/<key>` with npm's layout
+  (`package.json` with `_npx.packages`, `node_modules`, `.bin`), npm's cache
+  key, a 24-hour revalidation window for tags, ranges, and git refs,
+  `--prefer-online`, `--prefer-offline`, `--offline`, `--no-install`/`-n`,
+  and `oath cache npx ls|rm|info`.
+- `oath init <initializer>` runs `create-<initializer>` like `npm init`
+  (`@scope` runs `@scope/create`, `@scope/foo` runs `@scope/create-foo`,
+  versions and git shorthands carry over).
+- `--json-file <path>` records the signed assessment of a real run while
+  stdout stays with the program.
+- `--min-release-age <days|duration>` (alias `--min-age`) and
+  `--min-release-age-exclude <name>` on exec, enforced at resolution time
+  through the planner like npm's `min-release-age`, with defaults from
+  `.npmrc` (`min-release-age`, `min-release-age-exclude[]`) and from
+  `min_release_age` / `min_release_age_exclude` in `oath-policy.toml`.
+- Lifecycle scripts of the executed package run after the gate, in the cache
+  entry, under install's trust rules (the requested packages, the policy
+  allow-list, and their `trustedDependencies` run; `block_install_scripts`
+  stops the rest; `--yes` approves them; `--ignore-scripts` runs none), inside
+  the native sandbox when one is active.
+- `scripts/exec-parity.mjs` and `tests/compat/exec-fixtures.json`: 33 npx
+  versus `oath x` cases (common CLIs, scoped bins, `-p`, `-c`, local and
+  project bins, directory and tarball specs, exit codes), run on Linux,
+  macOS, and Windows in CI and required by the release evidence gate.
+
+### Changed
+- `oath exec` follows npm's prompt rule: it asks only when something must be
+  installed, only on a terminal outside CI, and never with `--yes`; the
+  prompt shows Oath's evidence (integrity, grade, publish date and age,
+  publisher, last change, size, downloads, capabilities, sandbox plan).
+  Packages with High or Critical findings still require a terminal or
+  `--yes`. Cached runs print nothing; `--dry-run` prints the card.
+- Oath's exec messages go to stderr; stdout is reserved for the program (or
+  for the one `--json --dry-run` document).
+- Sandboxed execs use the current directory as the working directory with
+  write access, grant the install tree read-only, and give the command npm's
+  `npx` environment (`PATH` with the bin directories, `npm_lifecycle_event`,
+  `npm_config_user_agent`, `npm_package_*`).
+- The Linux native sandbox applies file-scoped Landlock rights to files it
+  grants by path (the Node binary, a bin script), and its seccomp allowlist
+  accepts the legacy forms of the already-allowed path syscalls (`mkdir`,
+  `unlink`, `rename`, `open`, `stat`, `chmod`, `symlink`, ...) that libuv
+  issues, so tools can write to the working directory under containment.
+- `oath init <name>` no longer writes a `package.json` named `<name>`; it
+  runs the `create-<name>` initializer as npm does. Plain `oath init` is
+  unchanged.
+- The Arborist planner accepts a `before` cutoff and an exclude list, and
+  reports which package each `add` spec resolved to.
+
 ### Fixed
 - Bins of scoped packages now link into the owning `node_modules/.bin`
   directory instead of `node_modules/@scope/.bin`; bin targets are made

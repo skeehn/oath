@@ -534,6 +534,18 @@ current lock; `package.json` round-trips byte-for-byte.
 
 ### Phase 1: `oath x` as a complete npx and bunx replacement (weeks 2–8, ~6 ew)
 
+**Status: delivered** (X-01 through X-07, S-02 on exec, T-03). Two npx
+behaviors are deliberately not reproduced: the interactive subshell that
+`npx` with no arguments opens (Oath errors out), and running under
+`script-shell`; commands are launched directly through their shebang
+interpreter with the bin directories on `PATH`, and `--call` scripts run
+under `sh` (or `ComSpec`). Windows still lacks npm's `cmd-shim` files in
+`.bin` (Phase 2), so Oath resolves bins itself there. The git-spec parity
+case is reported but not required because it needs a reachable git host.
+Found and fixed on the way: Landlock rejected file-scoped grants (the Node
+binary), and the seccomp allowlist lacked the legacy filesystem syscalls
+libuv issues, so no sandboxed tool could write to its working directory.
+
 Goal: anyone can alias `npx=oath x` and `bunx=oath x` and nothing breaks,
 while getting assessment and sandboxing.
 

@@ -25,7 +25,11 @@ use oath_store::linker::Linker;
 use oath_workspace::{WorkspaceRoot, detect_workspace_root};
 
 mod approvals;
+mod exec;
 mod exec_assessment;
+mod exec_cache;
+mod exec_spec;
+mod launch;
 mod manifest;
 mod package_transfer;
 mod prompts;
@@ -47,6 +51,31 @@ enum ExecSandboxMode {
     Node,
     Native,
     Auto,
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// The exec cache under ~/.oath/cache/_npx
+    Npx {
+        #[command(subcommand)]
+        action: NpxCacheAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum NpxCacheAction {
+    /// List exec cache entries and the specs they were installed for
+    Ls,
+    /// Remove entries by key (unique prefixes accepted); `--force` with no key clears the cache
+    Rm {
+        keys: Vec<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show an entry's location and installed packages
+    Info { keys: Vec<String> },
 }
 
 #[derive(Subcommand)]
@@ -198,23 +227,39 @@ enum Commands {
         script: Option<String>,
         args: Vec<String>,
     },
-    /// Execute a package binary (like npx, but scanned first)
+    /// Run a command from a package (like npx and bunx, assessed first)
     #[command(visible_alias = "x")]
     Exec {
-        package: String,
-        /// Arguments passed to the package binary; flags after the package
-        /// name belong to it, as with npx (`oath x tsc --version`).
+        /// The command or package spec to run, then its arguments. Flags
+        /// after the command belong to it, as with npx (`oath x tsc --version`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Skip the risk prompt and run without asking (like npm's --yes)
+        /// Package(s) to install before running the command (repeatable), when
+        /// the command name differs from the package name (`-p typescript tsc`)
+        #[arg(short = 'p', long = "package", value_name = "SPEC")]
+        packages: Vec<String>,
+        /// Run this shell script instead of a command, with the package bins on PATH
+        #[arg(short = 'c', long = "call", value_name = "SCRIPT")]
+        call: Option<String>,
+        /// Install without prompting (like npm's --yes)
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Minimum release age required (e.g. '7d', '24h', '30d'). Block if newer.
-        #[arg(long)]
-        min_age: Option<String>,
-        /// Emit a machine-readable JSON verdict and never prompt (for agents / CI)
+        /// Fail instead of installing anything (npx --no-install / -n)
+        #[arg(short = 'n', long = "no-install", visible_alias = "no")]
+        no_install: bool,
+        /// Minimum release age: a day count like 7 or a duration like '7d' /
+        /// '24h'. Versions newer than this are skipped at resolution time.
+        #[arg(long, visible_alias = "min-age", value_name = "AGE")]
+        min_release_age: Option<String>,
+        /// Packages exempt from --min-release-age (repeatable)
+        #[arg(long, value_name = "NAME")]
+        min_release_age_exclude: Vec<String>,
+        /// Emit a machine-readable JSON verdict on stdout and never prompt (requires --dry-run)
         #[arg(long)]
         json: bool,
+        /// Write the JSON verdict to this file, then run the command normally
+        #[arg(long, value_name = "PATH")]
+        json_file: Option<PathBuf>,
         /// Assessment schema version to emit with --json (2 or 3).
         #[arg(long, default_value_t = 3)]
         schema_version: u32,
@@ -239,6 +284,18 @@ enum Commands {
         /// Persist an approval bound to this exact integrity, capability set, and sandbox policy.
         #[arg(long)]
         remember: bool,
+        /// Only use the exec cache; fail if anything would be downloaded
+        #[arg(long)]
+        offline: bool,
+        /// Use a cached install without checking the registry for newer versions
+        #[arg(long)]
+        prefer_offline: bool,
+        /// Check the registry for newer versions even inside the cache TTL
+        #[arg(long)]
+        prefer_online: bool,
+        /// Do not run the installed packages' lifecycle scripts
+        #[arg(long)]
+        ignore_scripts: bool,
     },
     /// Scan installed packages for malicious behavior (behavioral analysis, not a CVE audit)
     #[command(visible_alias = "audit")]
@@ -251,8 +308,23 @@ enum Commands {
     },
     /// Show what a package can access (permissions/capabilities)
     Perms { package: String },
-    /// Initialize a new project
-    Init { name: Option<String> },
+    /// Create a package.json, or run an initializer: `oath init foo` runs
+    /// `create-foo` (like `npm init foo`), `@scope` runs `@scope/create`
+    Init {
+        /// Initializer package (`foo` for create-foo); omit to write a plain package.json
+        initializer: Option<String>,
+        /// Arguments passed to the initializer
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Install the initializer without prompting
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Inspect the exec cache (`oath cache npx ls|rm|info`)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
     /// Explain why a package is in the dependency tree
     Why { package: String },
     /// List licenses of all installed packages
@@ -395,8 +467,15 @@ async fn async_main() -> Result<()> {
         Commands::Run { script, args } => {
             cmd_run(script.as_deref(), &args)?;
         }
-        Commands::Init { name } => {
-            cmd_init(name.as_deref())?;
+        Commands::Init {
+            initializer,
+            args,
+            yes,
+        } => {
+            let code = cmd_init(initializer.as_deref(), args, yes).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Commands::Scan {
             production,
@@ -423,11 +502,15 @@ async fn async_main() -> Result<()> {
             cmd_graph(depth)?;
         }
         Commands::Exec {
-            package,
             args,
+            packages,
+            call,
             yes,
-            min_age,
+            no_install,
+            min_release_age,
+            min_release_age_exclude,
             json,
+            json_file,
             schema_version,
             require_grade,
             dry_run,
@@ -436,29 +519,55 @@ async fn async_main() -> Result<()> {
             deny_network,
             allow_degraded_sandbox,
             remember,
+            offline,
+            prefer_offline,
+            prefer_online,
+            ignore_scripts,
         } => {
-            // cmd_exec returns the child's exit status instead of exiting
-            // itself so its temporary install directory is dropped first.
-            let code = cmd_exec(
-                &package,
-                &args,
+            // exec::run returns the child's exit status instead of exiting
+            // itself so its locks and temporary state are dropped first.
+            let code = exec::run(exec::ExecOptions {
+                args,
+                packages,
+                call,
                 yes,
-                min_age.as_deref(),
+                no_install,
+                min_release_age,
+                min_release_age_exclude,
                 json,
+                json_file,
                 schema_version,
-                require_grade.as_deref(),
+                require_grade,
                 dry_run,
                 sandbox,
                 sandbox_mode,
                 deny_network,
                 allow_degraded_sandbox,
                 remember,
-            )
+                offline,
+                prefer_offline,
+                prefer_online,
+                ignore_scripts,
+            })
             .await?;
             if code != 0 {
                 std::process::exit(code);
             }
         }
+        Commands::Cache { action } => match action {
+            CacheAction::Npx { action } => {
+                let cache = exec_cache::NpxCache::default_cache()?;
+                match action {
+                    NpxCacheAction::Ls => exec_cache::ls(&cache)?,
+                    NpxCacheAction::Rm {
+                        keys,
+                        force,
+                        dry_run,
+                    } => exec_cache::rm(&cache, &keys, force, dry_run)?,
+                    NpxCacheAction::Info { keys } => exec_cache::info(&cache, &keys)?,
+                }
+            }
+        },
         Commands::Score { package } => {
             cmd_score(&package).await?;
         }
@@ -1839,13 +1948,41 @@ fn shell_quote_arg(arg: &str) -> String {
 
 // ---- INIT -------------------------------------------------------------------
 
-fn cmd_init(name: Option<&str>) -> Result<()> {
-    let project_name = name.map(|n| n.to_string()).unwrap_or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "project".to_string())
-    });
+async fn cmd_init(initializer: Option<&str>, args: Vec<String>, yes: bool) -> Result<i32> {
+    if let Some(initializer) = initializer {
+        // npm init <initializer> is npm exec create-<initializer>.
+        let package = exec_spec::initializer_package(initializer)?;
+        let mut exec_args = vec![package];
+        exec_args.extend(args);
+        return exec::run(exec::ExecOptions {
+            args: exec_args,
+            packages: Vec::new(),
+            call: None,
+            yes,
+            no_install: false,
+            min_release_age: None,
+            min_release_age_exclude: Vec::new(),
+            json: false,
+            json_file: None,
+            schema_version: 3,
+            require_grade: None,
+            dry_run: false,
+            sandbox: false,
+            sandbox_mode: ExecSandboxMode::Off,
+            deny_network: false,
+            allow_degraded_sandbox: false,
+            remember: false,
+            offline: false,
+            prefer_offline: false,
+            prefer_online: false,
+            ignore_scripts: false,
+        })
+        .await;
+    }
+    let project_name = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "project".to_string());
 
     let pkg = serde_json::json!({
         "name": project_name,
@@ -1864,7 +2001,7 @@ fn cmd_init(name: Option<&str>) -> Result<()> {
     std::fs::write("package.json", &content)?;
     println!("oath init: created package.json");
     print!("{content}");
-    Ok(())
+    Ok(0)
 }
 
 // ---- WHY --------------------------------------------------------------------
@@ -3353,16 +3490,6 @@ fn safe_bin_entries(pkg_json: &serde_json::Value, install_name: &str) -> Vec<(St
     bins
 }
 
-fn preferred_bin_path(pkg_json: &serde_json::Value, install_name: &str) -> Option<PathBuf> {
-    let bins = safe_bin_entries(pkg_json, install_name);
-    let basename = package_bin_basename(install_name);
-
-    bins.iter()
-        .find(|(name, _)| name == install_name || name == basename)
-        .or_else(|| bins.first())
-        .map(|(_, path)| path.clone())
-}
-
 fn package_bin_basename(name: &str) -> &str {
     name.split('/').next_back().unwrap_or(name)
 }
@@ -3692,10 +3819,6 @@ fn resolve_exec_sandbox_capabilities(
     }
 }
 
-fn ensure_node_permission_sandbox() -> Result<&'static str> {
-    node_permission_flag().context("Node permission sandbox is unavailable on this Node runtime")
-}
-
 fn node_permission_flag() -> Option<&'static str> {
     let output = std::process::Command::new("node")
         .arg("--help")
@@ -3713,763 +3836,6 @@ fn node_permission_flag() -> Option<&'static str> {
     } else {
         None
     }
-}
-
-fn run_node_binary(
-    bin_path: &std::path::Path,
-    args: &[String],
-    exec_path: &std::path::Path,
-    sandbox_mode: ExecSandboxMode,
-    sandbox_plan: Option<&oath_sandbox::SandboxPlan>,
-) -> Result<std::process::ExitStatus> {
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    let _ = sandbox_plan;
-    #[cfg(target_os = "linux")]
-    if sandbox_mode == ExecSandboxMode::Native {
-        let plan = sandbox_plan.context("native sandbox requires a sandbox plan")?;
-        // Use the Node on PATH (nvm, Volta, fnm, Homebrew, or the system one)
-        // and grant exactly that binary inside the namespace, read-only.
-        let node = active_node_executable()?;
-        let mut plan = plan.clone();
-        if !node.starts_with("/usr") && !node.starts_with("/bin") && !node.starts_with("/lib") {
-            plan.read_only_paths.push(node.clone());
-        }
-        return oath_sandbox::linux::run(
-            &plan,
-            &node,
-            &std::iter::once(bin_path.display().to_string())
-                .chain(args.iter().cloned())
-                .collect::<Vec<_>>(),
-        );
-    }
-    #[cfg(target_os = "windows")]
-    if sandbox_mode == ExecSandboxMode::Native {
-        let plan = sandbox_plan.context("native sandbox requires a sandbox plan")?;
-        return oath_sandbox::windows::run(
-            plan,
-            std::path::Path::new("node.exe"),
-            &std::iter::once(bin_path.display().to_string())
-                .chain(args.iter().cloned())
-                .collect::<Vec<_>>(),
-        );
-    }
-    #[cfg(target_os = "macos")]
-    if sandbox_mode == ExecSandboxMode::Native {
-        let plan = sandbox_plan.context("native sandbox requires a sandbox plan")?;
-        let node = active_node_executable()?;
-        let mut plan = plan.clone();
-        plan.read_only_paths.push(node.clone());
-        return oath_sandbox::macos::run(
-            &plan,
-            &node,
-            &std::iter::once(bin_path.display().to_string())
-                .chain(args.iter().cloned())
-                .collect::<Vec<_>>(),
-        );
-    }
-    let mut cmd = std::process::Command::new("node");
-    if sandbox_mode == ExecSandboxMode::Node {
-        let permission_flag = ensure_node_permission_sandbox()?;
-        let cwd = std::env::current_dir().context("failed to read current dir")?;
-        let tmp = std::env::temp_dir();
-        cmd.arg(permission_flag)
-            .arg(format!("--allow-fs-read={}", cwd.display()))
-            .arg(format!("--allow-fs-read={}", exec_path.display()))
-            .arg(format!("--allow-fs-read={}", tmp.display()))
-            .arg(format!("--allow-fs-write={}", cwd.display()))
-            .arg(format!("--allow-fs-write={}", tmp.display()));
-    }
-
-    cmd.arg(bin_path).args(args).status().with_context(|| {
-        format!(
-            "failed to execute node {} with sandbox mode {}",
-            bin_path.display(),
-            sandbox_mode.as_str()
-        )
-    })
-}
-
-/// Canonical path of the Node executable the user's PATH selects.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn active_node_executable() -> Result<PathBuf> {
-    let node = std::process::Command::new("node")
-        .args(["-p", "process.execPath"])
-        .output()
-        .context("failed to resolve the active Node executable")?;
-    anyhow::ensure!(node.status.success(), "active Node executable probe failed");
-    let node = PathBuf::from(String::from_utf8(node.stdout)?.trim());
-    std::fs::canonicalize(&node)
-        .with_context(|| format!("failed to canonicalize Node executable {}", node.display()))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn cmd_exec(
-    package: &str,
-    args: &[String],
-    yes: bool,
-    min_age: Option<&str>,
-    json: bool,
-    schema_version: u32,
-    require_grade: Option<&str>,
-    dry_run: bool,
-    sandbox: bool,
-    sandbox_mode: ExecSandboxMode,
-    deny_network: bool,
-    allow_degraded_sandbox: bool,
-    remember: bool,
-) -> Result<i32> {
-    use oath_analyze::{
-        FindingKind, PackageScanner, RiskLevel, ScoreContext, compute_safety_score_contextual,
-    };
-
-    let start = std::time::Instant::now();
-    anyhow::ensure!(
-        matches!(schema_version, 2 | 3),
-        "unsupported exec assessment schema {schema_version}; supported versions are 2 and 3"
-    );
-    // JSON mode reserves stdout for exactly one assessment document; a program
-    // that then writes to the same stream would corrupt it. Agents assess with
-    // --dry-run --json, then execute with the plain command.
-    anyhow::ensure!(
-        !json || dry_run,
-        "oath exec --json is an assessment-only interface and requires --dry-run; run the package without --json afterwards"
-    );
-    let (pkg_name, pkg_version) = parse_package_spec(package);
-    let sandbox_decision = resolve_exec_sandbox(sandbox, sandbox_mode, allow_degraded_sandbox)?;
-    let effective_deny_network = deny_network || sandbox_decision.agent_mode;
-
-    // Local node_modules/.bin path: a bin the project already installed. It
-    // still goes through assessment (scan, grade gate, prompt); only the
-    // download is skipped. A version spec that the local copy does not satisfy
-    // falls through to the registry, like npx.
-    if !dry_run
-        && sandbox_decision.effective_mode == ExecSandboxMode::Off
-        && let Some(local) = resolve_local_bin(&pkg_name, &pkg_version)?
-    {
-        return exec_local_bin(&local, args, yes, require_grade).await;
-    }
-
-    if !json {
-        println!("oath exec: inspecting {}@{}...", pkg_name, pkg_version);
-    }
-    let client = RegistryClient::default_client()?;
-    let packument = client
-        .fetch_packument(&pkg_name)
-        .await
-        .with_context(|| format!("fetching {pkg_name}"))?;
-    let resolved = oath_fetch::resolve_version(&packument, &pkg_version)
-        .with_context(|| format!("resolving {pkg_name}@{pkg_version}"))?;
-    let version = resolved.version.to_string();
-    let info = resolved.info;
-
-    // Full packument -> publish time, last publisher, repository.
-    let full = client.fetch_packument_full(&pkg_name).await.ok();
-    let age_days: Option<u64> = full
-        .as_ref()
-        .and_then(|v| {
-            v.get("time")
-                .and_then(|t| t.get(&version))
-                .and_then(|s| s.as_str())
-                .map(String::from)
-        })
-        .and_then(|pts| parse_iso_age_secs(&pts))
-        .map(|secs| secs / 86400);
-    let last_publisher: Option<String> = full.as_ref().and_then(|v| {
-        v.get("versions")
-            .and_then(|vs| vs.get(&version))
-            .and_then(|ver| ver.get("_npmUser"))
-            .and_then(|u| u.get("name"))
-            .and_then(|n| n.as_str())
-            .map(String::from)
-            .or_else(|| {
-                v.get("maintainers")
-                    .and_then(|m| m.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|m| m.get("name"))
-                    .and_then(|n| n.as_str())
-                    .map(String::from)
-            })
-    });
-    let repository: Option<String> = full.as_ref().and_then(|v| {
-        v.get("repository").and_then(|r| {
-            r.get("url")
-                .and_then(|u| u.as_str())
-                .or_else(|| r.as_str())
-                .map(String::from)
-        })
-    });
-    let open_source = repository.is_some();
-
-    // Age gate (before download).
-    if let (Some(days), Some(min_str)) = (age_days, min_age)
-        && let Some(min_secs) = parse_duration_secs(min_str)
-    {
-        let min_days = (min_secs / 86400).max(1);
-        if days < min_days {
-            if json {
-                let sandbox_capabilities = match sandbox_decision.effective_mode {
-                    ExecSandboxMode::Native => oath_sandbox::verified_native_capabilities(),
-                    ExecSandboxMode::Node => oath_sandbox::BackendCapabilities {
-                        backend: "node-permissions".into(),
-                        available: true,
-                        filesystem_isolation: true,
-                        network_isolation: true,
-                        process_isolation: false,
-                        resource_limits: false,
-                        degraded_reason: Some(
-                            "Node permissions are not an OS process sandbox".into(),
-                        ),
-                    },
-                    _ => oath_sandbox::BackendCapabilities {
-                        backend: "off".into(),
-                        available: true,
-                        filesystem_isolation: false,
-                        network_isolation: false,
-                        process_isolation: false,
-                        resource_limits: false,
-                        degraded_reason: Some("sandbox disabled".into()),
-                    },
-                };
-                let assessment = exec_assessment::ExecAssessment {
-                    schema_version: exec_assessment::EXEC_ASSESSMENT_VERSION,
-                    identity: exec_assessment::PackageIdentity {
-                        name: pkg_name.clone(),
-                        version: version.clone(),
-                        binary: None,
-                        registry: "https://registry.npmjs.org".into(),
-                        integrity: info.dist.integrity.clone(),
-                        publisher: last_publisher.clone(),
-                        publish_age_days: age_days,
-                        repository: repository.clone(),
-                    },
-                    evidence: exec_assessment::PackageEvidence {
-                        unpacked_bytes: 0,
-                        dependency_count: 0,
-                        readable_source: false,
-                        obfuscated: false,
-                        native_code: false,
-                        lifecycle_hooks: false,
-                        capabilities: Vec::new(),
-                        findings: Vec::new(),
-                        limitations: vec![
-                            "Artifact analysis was skipped because release-age policy denied execution before download",
-                        ],
-                        version_diff: None,
-                    },
-                    policy: exec_assessment::PolicyDecision {
-                        decision: "block",
-                        reason_code: oath_contracts::ReasonCode::ExecReleaseTooNew,
-                        grade: "unknown".into(),
-                        score: 0,
-                    },
-                    sandbox: sandbox_capabilities,
-                    sandbox_plan: None,
-                };
-                let policy_digest = oath_contracts::digest_json(&serde_json::json!({
-                    "require_grade": require_grade,
-                    "min_age": min_age,
-                    "minimum_age_days": min_days,
-                    "sandbox_mode": sandbox_decision.effective_mode.as_str(),
-                    "deny_network": effective_deny_network,
-                    "allow_degraded_sandbox": allow_degraded_sandbox,
-                }))?;
-                let assessment_value = if schema_version == 2 {
-                    serde_json::to_value(&assessment)?
-                } else {
-                    let generated_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|duration| duration.as_secs())
-                        .unwrap_or(0);
-                    serde_json::to_value(exec_assessment::signed_v3(
-                        &assessment,
-                        generated_at,
-                        policy_digest,
-                    )?)?
-                };
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "assessment": assessment_value,
-                        "name": pkg_name,
-                        "version": version,
-                        "age_days": days,
-                        "decision": if schema_version == 2 { "block" } else { "deny" },
-                        "reason": "min-age"
-                    }))?
-                );
-            } else {
-                eprintln!(
-                    "oath exec: BLOCKED -- {pkg_name}@{version} is {days}d old (need >= {min_days}d)"
-                );
-            }
-            return Ok(EXEC_EXIT_AGE);
-        }
-    }
-
-    // Plan the full temporary install with the same placement authority used by
-    // `install`; Oath still owns download, integrity, scanning, and execution.
-    let exec_dir = tempfile::tempdir()?;
-    let exec_path = exec_dir.path().to_path_buf();
-    let exec_pkg = serde_json::json!({
-        "name": "oath-exec-tmp",
-        "version": "0.0.0",
-        "dependencies": { &pkg_name: &version }
-    });
-    std::fs::write(
-        exec_path.join("package.json"),
-        serde_json::to_string(&exec_pkg)?,
-    )?;
-    let mut placement_plan = ArboristPlanner::plan(&exec_path)?;
-    hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let mut graph = placement_plan.to_dep_graph()?;
-    let store2 = Arc::new(ContentStore::default_store()?);
-    let registry = Arc::new(RegistryClient::default_client()?);
-    download_and_prune(&mut placement_plan, &mut graph, &store2, registry).await?;
-    let linker = oath_store::Linker::new((*store2).clone());
-    linker.link_placement_plan(&placement_plan, &exec_path)?;
-    let pkg_dir = exec_path.join("node_modules").join(&pkg_name);
-
-    // Scan + score before deciding to run.
-    let report = PackageScanner::scan(&pkg_name, &version, &pkg_dir)?;
-    let caps = &report.capabilities;
-    // Popularity/age context so the grade (and any --require-grade gate) trusts
-    // widely-used packages: a flagged-but-1M+-download package with no critical
-    // finding is a false positive, not something to block on an npx-style run.
-    let ctx = {
-        let mut weekly = 0u64;
-        let mut age = 0u32;
-        if let Ok(http) =
-            oath_fetch::http::client_builder().and_then(|b| b.build().map_err(Into::into))
-            && let Ok(meta) = oath_fetch::fetch_package_metadata(&http, &pkg_name).await
-        {
-            weekly = meta.weekly_downloads.unwrap_or(0);
-            age = meta.last_publish_age_days.map(|d| d as u32).unwrap_or(0);
-        }
-        ScoreContext {
-            is_dev: false,
-            weekly_downloads: weekly,
-            age_days: age,
-        }
-    };
-    let score = compute_safety_score_contextual(&report, &pkg_dir, &ctx);
-    let obfuscated = report.findings.iter().any(|f| {
-        f.kind == FindingKind::Obfuscation
-            && matches!(f.risk, RiskLevel::High | RiskLevel::Critical)
-    });
-    let unpacked_kb = dir_size(&pkg_dir) / 1024;
-    let serious = if matches!(report.overall_risk, RiskLevel::High | RiskLevel::Critical) {
-        report.verdict_reasons.clone()
-    } else {
-        Vec::new()
-    };
-    let mut perms: Vec<&str> = Vec::new();
-    if caps.network {
-        perms.push("network");
-    }
-    if caps.filesystem {
-        perms.push("filesystem");
-    }
-    if caps.env_access {
-        perms.push("env");
-    }
-    if caps.subprocess {
-        perms.push("subprocess");
-    }
-    if caps.dynamic_exec {
-        perms.push("eval");
-    }
-    if caps.has_install_scripts {
-        perms.push("install-scripts");
-    }
-
-    let grade_blocked = require_grade
-        .map(|g| grade_rank(score.grade) < grade_rank(g.chars().next().unwrap_or('A')))
-        .unwrap_or(false);
-
-    let pkg_json_path = pkg_dir.join("package.json");
-    let preferred_binary = if pkg_json_path.exists() {
-        let pkg_json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&pkg_json_path)?)?;
-        preferred_bin_path(&pkg_json, &pkg_name)
-    } else {
-        None
-    };
-
-    let mut sandbox_plan = (sandbox_decision.effective_mode != ExecSandboxMode::Off)
-        .then(|| oath_sandbox::SandboxPlan::strict(pkg_name.clone(), exec_path.clone()));
-    if !effective_deny_network
-        && caps.network
-        && let Some(plan) = &mut sandbox_plan
-    {
-        plan.network = oath_sandbox::NetworkMode::Inherit;
-    }
-
-    let native_code = ["binding.gyp", "prebuilds"]
-        .iter()
-        .any(|p| pkg_dir.join(p).exists());
-    let version_diff = full.as_ref().and_then(|packument| {
-        previous_release_diff(
-            packument,
-            &version,
-            last_publisher.as_deref(),
-            caps.has_install_scripts,
-        )
-    });
-    let assessment = exec_assessment::ExecAssessment {
-        schema_version: exec_assessment::EXEC_ASSESSMENT_VERSION,
-        identity: exec_assessment::PackageIdentity {
-            name: pkg_name.clone(),
-            version: version.clone(),
-            binary: preferred_binary
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            registry: "https://registry.npmjs.org".into(),
-            integrity: info.dist.integrity.clone(),
-            publisher: last_publisher.clone(),
-            publish_age_days: age_days,
-            repository: repository.clone(),
-        },
-        evidence: exec_assessment::PackageEvidence {
-            unpacked_bytes: dir_size(&pkg_dir),
-            dependency_count: graph.nodes.len(),
-            readable_source: !obfuscated,
-            obfuscated,
-            native_code,
-            lifecycle_hooks: caps.has_install_scripts,
-            capabilities: perms.iter().map(|p| (*p).to_string()).collect(),
-            findings: serious.clone(),
-            limitations: vec![
-                "Static analysis cannot prove safety",
-                "Remote second-stage payloads and opaque binaries may evade inspection",
-            ],
-            version_diff,
-        },
-        policy: exec_assessment::PolicyDecision {
-            decision: if grade_blocked { "block" } else { "allow" },
-            reason_code: if grade_blocked {
-                oath_contracts::ReasonCode::ExecGradeBelowRequired
-            } else {
-                oath_contracts::ReasonCode::ExecAllowed
-            },
-            grade: score.grade.to_string(),
-            score: score.score,
-        },
-        sandbox: match sandbox_decision.effective_mode {
-            ExecSandboxMode::Native => oath_sandbox::verified_native_capabilities(),
-            ExecSandboxMode::Node => oath_sandbox::BackendCapabilities {
-                backend: "node-permissions".into(),
-                available: true,
-                filesystem_isolation: true,
-                network_isolation: true,
-                process_isolation: false,
-                resource_limits: false,
-                degraded_reason: Some("Node permissions are not an OS process sandbox".into()),
-            },
-            _ => oath_sandbox::BackendCapabilities {
-                backend: "off".into(),
-                available: true,
-                filesystem_isolation: false,
-                network_isolation: false,
-                process_isolation: false,
-                resource_limits: false,
-                degraded_reason: Some("sandbox disabled".into()),
-            },
-        },
-        sandbox_plan: sandbox_plan.clone(),
-    };
-    let approval = approvals::ExecApproval {
-        package: pkg_name.clone(),
-        version: version.clone(),
-        integrity: info.dist.integrity.clone().unwrap_or_default(),
-        capabilities: perms.iter().map(|p| (*p).to_string()).collect(),
-        sandbox_backend: assessment.sandbox.backend.clone(),
-        deny_network: effective_deny_network,
-    };
-    let approval_store = approvals::ApprovalStore::default_store()?;
-    let previously_approved =
-        !approval.integrity.is_empty() && approval_store.contains(&approval)?;
-
-    if json {
-        let policy_digest = oath_contracts::digest_json(&serde_json::json!({
-            "require_grade": require_grade,
-            "min_age": min_age,
-            "sandbox_mode": sandbox_decision.effective_mode.as_str(),
-            "deny_network": effective_deny_network,
-            "allow_degraded_sandbox": allow_degraded_sandbox,
-        }))?;
-        let assessment_value = if schema_version == 2 {
-            serde_json::to_value(&assessment)?
-        } else {
-            let generated_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            serde_json::to_value(exec_assessment::signed_v3(
-                &assessment,
-                generated_at,
-                policy_digest,
-            )?)?
-        };
-        let verdict = serde_json::json!({
-            "assessment": assessment_value,
-            "approval": { "integrity_bound": true, "previously_approved": previously_approved },
-            "name": pkg_name,
-            "version": version,
-            "integrity": info.dist.integrity,
-            "grade": score.grade.to_string(),
-            "score": score.score,
-            "age_days": age_days,
-            "last_publisher": last_publisher,
-            "open_source": open_source,
-            "repository": repository,
-            "obfuscated": obfuscated,
-            "unpacked_kb": unpacked_kb,
-            "permissions": perms,
-            "sandbox_mode": sandbox_decision.requested_mode.as_str(),
-            "sandbox_effective": sandbox_decision.effective_mode.as_str(),
-            "sandbox_degraded_allowed": allow_degraded_sandbox,
-            "network_denied": effective_deny_network,
-            "verdict": format!("{:?}", report.overall_risk),
-            "findings": serious,
-            "decision": if grade_blocked { "block" } else { "allow" },
-            "reason": if grade_blocked { "require-grade" } else { "" },
-        });
-        println!("{}", serde_json::to_string_pretty(&verdict)?);
-        if grade_blocked {
-            return Ok(EXEC_EXIT_GRADE);
-        }
-        // --json implies --dry-run (checked above).
-        return Ok(0);
-    } else {
-        // Human pre-run card.
-        println!("\n  {}@{}", pkg_name, version);
-        println!("  grade        {} ({}/100)", score.grade, score.score);
-        if let Some(d) = age_days {
-            println!("  published    {d} days ago");
-        }
-        if let Some(p) = &last_publisher {
-            println!("  publisher    {p}");
-        }
-        println!(
-            "  open source  {}",
-            if open_source { "yes" } else { "unknown" }
-        );
-        println!(
-            "  source       {}",
-            if obfuscated { "obfuscated" } else { "readable" }
-        );
-        println!("  size         {unpacked_kb} KB");
-        println!(
-            "  permissions  {}",
-            if perms.is_empty() {
-                "none".to_string()
-            } else {
-                perms.join(", ")
-            }
-        );
-        if sandbox_decision.effective_mode != ExecSandboxMode::Off {
-            println!(
-                "  sandbox      {}",
-                sandbox_decision.effective_mode.as_str()
-            );
-        }
-        if !serious.is_empty() {
-            println!("\n  findings:");
-            for finding in serious.iter().take(5) {
-                println!("    {finding}");
-            }
-        }
-        if grade_blocked {
-            eprintln!(
-                "\n  BLOCKED -- grade {} is below required {}",
-                score.grade,
-                require_grade.unwrap_or("")
-            );
-            return Ok(EXEC_EXIT_GRADE);
-        }
-        if dry_run {
-            return Ok(0);
-        }
-        let needs_prompt = !serious.is_empty()
-            && !yes
-            && !previously_approved
-            && std::env::var("OATH_ALLOW_ALL").is_err();
-        if needs_prompt && !confirm_run_anyway()? {
-            return Ok(EXEC_EXIT_USER);
-        }
-    }
-
-    if remember {
-        anyhow::ensure!(
-            !approval.integrity.is_empty(),
-            "cannot remember an approval without registry integrity"
-        );
-        approval_store.remember(approval)?;
-    }
-
-    // Find the binary.
-    let bin_path = match preferred_binary {
-        Some(rel) => pkg_dir.join(rel),
-        None => {
-            let candidates = ["cli.js", "bin/index.js", "index.js", "bin.js"];
-            match candidates
-                .iter()
-                .map(|c| pkg_dir.join(c))
-                .find(|p| p.exists())
-            {
-                Some(path) => path,
-                None => {
-                    eprintln!("oath exec: could not find binary for {pkg_name}");
-                    return Ok(1);
-                }
-            }
-        }
-    };
-
-    let elapsed = start.elapsed();
-    if !json && elapsed.as_millis() > 100 {
-        eprintln!("  fetched + scanned in {:.1}s", elapsed.as_secs_f64());
-    }
-
-    let status = run_node_binary(
-        &bin_path,
-        args,
-        &exec_path,
-        sandbox_decision.effective_mode,
-        sandbox_plan.as_ref(),
-    )
-    .with_context(|| format!("failed to execute node {}", bin_path.display()))?;
-    Ok(status.code().unwrap_or(1))
-}
-
-/// Ask the user to confirm running a package with serious findings.
-fn confirm_run_anyway() -> Result<bool> {
-    use std::io::Write;
-    print!("\n  run anyway? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    if input.trim().eq_ignore_ascii_case("y") {
-        Ok(true)
-    } else {
-        println!("  blocked.");
-        Ok(false)
-    }
-}
-
-/// A bin the current project already installed under node_modules/.bin.
-struct LocalBin {
-    bin_path: PathBuf,
-    package_dir: PathBuf,
-    name: String,
-    version: String,
-}
-
-/// Locate `node_modules/.bin/<name>` and the package that provides it. Returns
-/// `None` when there is no such bin, or when a requested version does not
-/// match the installed one.
-fn resolve_local_bin(bin_name: &str, requested: &str) -> Result<Option<LocalBin>> {
-    let bin_path = PathBuf::from("node_modules/.bin").join(bin_name);
-    if bin_path.symlink_metadata().is_err() {
-        return Ok(None);
-    }
-    let resolved = std::fs::canonicalize(&bin_path)
-        .with_context(|| format!("resolve local bin {}", bin_path.display()))?;
-    let mut package_dir = resolved.parent();
-    let manifest = loop {
-        let Some(dir) = package_dir else {
-            return Ok(None);
-        };
-        let candidate = dir.join("package.json");
-        if candidate.is_file() {
-            break candidate;
-        }
-        package_dir = dir.parent();
-    };
-    let package_dir = package_dir
-        .expect("package dir found with manifest")
-        .to_path_buf();
-    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest)?)
-        .with_context(|| format!("parse {}", manifest.display()))?;
-    let name = value["name"].as_str().unwrap_or(bin_name).to_string();
-    let version = value["version"].as_str().unwrap_or("0.0.0").to_string();
-    let satisfied = requested == "latest"
-        || requested == version
-        || requested
-            .parse::<node_semver::Range>()
-            .ok()
-            .zip(version.parse::<node_semver::Version>().ok())
-            .is_some_and(|(range, installed)| range.satisfies(&installed));
-    if !satisfied {
-        return Ok(None);
-    }
-    Ok(Some(LocalBin {
-        bin_path,
-        package_dir,
-        name,
-        version,
-    }))
-}
-
-/// Assess and run a locally installed bin. The project chose this package, so
-/// no download happens, but the same scan, grade gate, and prompt apply.
-async fn exec_local_bin(
-    local: &LocalBin,
-    args: &[String],
-    yes: bool,
-    require_grade: Option<&str>,
-) -> Result<i32> {
-    use oath_analyze::{PackageScanner, RiskLevel, ScoreContext, compute_safety_score_contextual};
-
-    let report = PackageScanner::scan(&local.name, &local.version, &local.package_dir)?;
-    let serious = if matches!(report.overall_risk, RiskLevel::High | RiskLevel::Critical) {
-        report.verdict_reasons.clone()
-    } else {
-        Vec::new()
-    };
-    println!(
-        "oath exec: running {}@{} (local)",
-        local.name, local.version
-    );
-    if let Some(required) = require_grade {
-        // Grade needs popularity context; fetch it best-effort.
-        let mut ctx = ScoreContext {
-            is_dev: false,
-            weekly_downloads: 0,
-            age_days: 0,
-        };
-        if let Ok(http) =
-            oath_fetch::http::client_builder().and_then(|b| b.build().map_err(Into::into))
-            && let Ok(meta) = oath_fetch::fetch_package_metadata(&http, &local.name).await
-        {
-            ctx.weekly_downloads = meta.weekly_downloads.unwrap_or(0);
-            ctx.age_days = meta.last_publish_age_days.map(|d| d as u32).unwrap_or(0);
-        }
-        let score = compute_safety_score_contextual(&report, &local.package_dir, &ctx);
-        println!("  grade        {} ({}/100)", score.grade, score.score);
-        if grade_rank(score.grade) < grade_rank(required.chars().next().unwrap_or('A')) {
-            eprintln!(
-                "\n  BLOCKED -- grade {} is below required {}",
-                score.grade, required
-            );
-            return Ok(EXEC_EXIT_GRADE);
-        }
-    }
-    if !serious.is_empty() {
-        println!("\n  findings:");
-        for finding in serious.iter().take(5) {
-            println!("    {finding}");
-        }
-        let needs_prompt = !yes && std::env::var("OATH_ALLOW_ALL").is_err();
-        if needs_prompt && !confirm_run_anyway()? {
-            return Ok(EXEC_EXIT_USER);
-        }
-    }
-    let status = std::process::Command::new(&local.bin_path)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to execute {}", local.bin_path.display()))?;
-    Ok(status.code().unwrap_or(1))
 }
 
 // ---- SCORE ------------------------------------------------------------------
@@ -4731,6 +4097,14 @@ fn parse_iso_age_secs(iso: &str) -> Option<u64> {
 }
 
 /// Parse a human duration string like "7d", "24h", "30d" into seconds.
+/// An RFC 3339 timestamp `days` days before now, for tests of age logic.
+#[cfg(test)]
+fn rfc3339_days_ago(days: u64) -> String {
+    oath_resolve::placement::rfc3339(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400 + 60),
+    )
+}
+
 fn parse_duration_secs(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -6222,21 +5596,6 @@ mod tests {
         assert_eq!(
             safe_bin_entries(&pkg, "pkg"),
             vec![("safe".to_string(), PathBuf::from("bin/safe.js"))]
-        );
-    }
-
-    #[test]
-    fn preferred_bin_path_uses_scoped_basename() {
-        let pkg = serde_json::json!({
-            "bin": {
-                "tool": "bin/tool.js",
-                "pkg": "bin/pkg.js"
-            }
-        });
-
-        assert_eq!(
-            preferred_bin_path(&pkg, "@scope/pkg"),
-            Some(PathBuf::from("bin/pkg.js"))
         );
     }
 }

@@ -30,6 +30,18 @@ pub struct PlacementPlan {
     /// which never rewrite package.json.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_manifest: Option<RootManifest>,
+    /// Each `add` request spec paired with the package name Arborist resolved
+    /// for it. Registry specs carry their name; git, directory, and tarball
+    /// specs only learn theirs from the fetched manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<AddedSpec>,
+}
+
+/// One requested spec and the package name it resolved to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedSpec {
+    pub raw: String,
+    pub name: String,
 }
 
 /// Root package.json dependency sections as npm's `saveIdealTree` would save
@@ -225,6 +237,14 @@ pub struct PlacementRequest {
     pub update: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_type: Option<String>,
+    /// npm's `before` cutoff as an RFC 3339 timestamp: only versions published
+    /// at or before this instant are eligible. `min-release-age` is expressed
+    /// as `now - age`, exactly as npm's config flattening does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Package names exempt from the `before` cutoff (`min-release-age-exclude`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub min_release_age_exclude: Vec<String>,
 }
 
 impl PlacementRequest {
@@ -253,6 +273,49 @@ impl PlacementRequest {
             ..Self::default()
         }
     }
+
+    /// Restrict resolution to versions published at least `min_age` ago,
+    /// except for the named packages.
+    pub fn with_min_release_age(
+        mut self,
+        min_age: std::time::Duration,
+        exclude: Vec<String>,
+    ) -> Self {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(min_age)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        self.before = Some(rfc3339(cutoff));
+        self.min_release_age_exclude = exclude;
+        self
+    }
+}
+
+/// Format a system time as an RFC 3339 UTC timestamp with second precision.
+pub fn rfc3339(time: std::time::SystemTime) -> String {
+    let secs = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // Civil-from-days (Howard Hinnant's algorithm), valid for the proleptic
+    // Gregorian calendar.
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 pub struct ArboristPlanner;
@@ -518,6 +581,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rfc3339_formats_epoch_seconds_as_utc() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            rfc3339(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            "2023-11-14T22:13:20Z"
+        );
+        assert_eq!(
+            rfc3339(UNIX_EPOCH + Duration::from_secs(951_782_400)),
+            "2000-02-29T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn min_release_age_request_serializes_cutoff_and_excludes() {
+        let request = PlacementRequest::add(vec!["cowsay".into()], false).with_min_release_age(
+            std::time::Duration::from_secs(86_400),
+            vec!["cowsay".into()],
+        );
+        let value = serde_json::to_value(&request).unwrap();
+        assert!(value["before"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(
+            value["min_release_age_exclude"],
+            serde_json::json!(["cowsay"])
+        );
+        let plain = serde_json::to_value(PlacementRequest::default()).unwrap();
+        assert!(plain.get("before").is_none());
+        assert!(plain.get("min_release_age_exclude").is_none());
+    }
+
+    #[test]
     fn root_manifest_apply_keeps_remaining_key_order_when_pruning_a_section() {
         let mut manifest = serde_json::json!({
             "name": "demo",
@@ -576,6 +670,7 @@ mod tests {
             removed_locations: vec![],
             invalid_edges: vec![],
             root_manifest: None,
+            added: Vec::new(),
         };
         assert!(validate_locations(&plan).is_err());
     }
