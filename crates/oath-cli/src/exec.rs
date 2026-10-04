@@ -78,6 +78,11 @@ pub struct ExecRecords {
     /// re-planned when it changes.
     #[serde(default)]
     pub cooldown: Option<CooldownRecord>,
+    /// Whether the install's lifecycle scripts are still owed: set when the
+    /// entry is linked and cleared only after they ran, so a `--dry-run`, a
+    /// declined prompt, or a blocked run does not lose them.
+    #[serde(default)]
+    pub scripts_pending: bool,
     #[serde(default)]
     pub records: BTreeMap<String, PackageRecord>,
 }
@@ -239,7 +244,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
             return run_installed_bin(&ctx, &opts, &bin_dir, &cmd, &args[1..]).await;
         }
         if let Some(bin_dir) = global_bin_dir()
-            && launch::find_command(&cmd, std::slice::from_ref(&bin_dir), &ctx.cwd).is_ok()
+            && launch::command_in_dir(&bin_dir, &cmd).is_some()
         {
             return run_installed_bin(&ctx, &opts, &bin_dir, &cmd, &args[1..]).await;
         }
@@ -327,6 +332,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
                 packages: components.clone(),
                 added,
                 cooldown: cooldown_record(&ctx),
+                scripts_pending: true,
                 records: BTreeMap::new(),
             };
             write_records(&entry, &records)?;
@@ -356,6 +362,10 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
     };
 
     let recorded = records.records.get(&command_name).cloned();
+    // An entry without an approved record for this package is still being
+    // installed from the user's point of view: a declined prompt, a dry run,
+    // or a blocked run must not turn the next run into a silent cache hit.
+    let installing = fresh_install || recorded.as_ref().is_none_or(|record| !record.approved);
     let needs_assessment = fresh_install
         || opts.dry_run
         || opts.json
@@ -365,7 +375,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
             !record.approved || record.version != version || record.integrity != target.integrity
         });
     let record = if needs_assessment {
-        let registry = registry_info_for(&opts, &target, fresh_install || opts.dry_run).await;
+        let registry = registry_info_for(&opts, &target, installing || opts.dry_run).await;
         // A cached entry may predate the cooldown; a fresh install already
         // resolved under it.
         if !fresh_install
@@ -388,7 +398,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
             &opts,
             &target,
             &registry,
-            fresh_install,
+            installing,
             command_name_of(&args),
         )? {
             Gate::Exit(code) => return Ok(code),
@@ -416,10 +426,22 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
         record
     };
 
-    if let Some((plan, graph)) = pending_scripts
-        && !opts.ignore_scripts
-    {
-        run_entry_scripts(&ctx, &opts, &entry, &plan, &graph, &names)?;
+    if records.scripts_pending && !opts.ignore_scripts {
+        // Scripts owed by this install, or by an earlier run of it that
+        // ended before the gate passed: rebuild the plan if needed.
+        let owed = match pending_scripts {
+            Some(pending) => Some(pending),
+            None => {
+                let plan = PlacementPlan::read(&entry.join(".oath").join("placement-plan.json"))?;
+                let graph = plan.to_dep_graph()?;
+                Some((plan, graph))
+            }
+        };
+        if let Some((plan, graph)) = owed {
+            run_entry_scripts(&ctx, &opts, &entry, &plan, &graph, &names)?;
+        }
+        records.scripts_pending = false;
+        write_records(&entry, &records)?;
     }
     let needs_network = record.capabilities.iter().any(|c| c == "network");
     run_resolved(&ctx, &opts, &args, &bin_dirs, &command_name, needs_network).await
@@ -1594,15 +1616,12 @@ async fn run_installed_bin(
     cmd: &str,
     args: &[String],
 ) -> Result<i32> {
-    let file = launch::find_command(cmd, std::slice::from_ref(&bin_dir.to_path_buf()), &ctx.cwd)?;
+    // Only the bin directory that was found is searched, never the host PATH.
+    let file = launch::command_in_dir(bin_dir, cmd)
+        .with_context(|| format!("{cmd} is not in {}", bin_dir.display()))?;
     let resolved = std::fs::canonicalize(&file)?;
-    let package_dir = resolved
-        .ancestors()
-        .skip(1)
-        .find(|dir| dir.join("package.json").is_file())
-        .map(Path::to_path_buf)
-        .with_context(|| format!("no package.json above {}", resolved.display()))?;
-    let manifest = read_manifest(&package_dir)?;
+    let (package_dir, manifest) = owning_package(&resolved)
+        .with_context(|| format!("no named package.json above {}", resolved.display()))?;
     let name = manifest["name"].as_str().unwrap_or(cmd).to_string();
     let version = manifest["version"].as_str().unwrap_or("0.0.0").to_string();
     let install_root = bin_dir.parent().and_then(Path::parent).unwrap_or(bin_dir);
@@ -1629,6 +1648,18 @@ async fn run_installed_bin(
         needs_network,
     )
     .await
+}
+
+/// The package a bin file belongs to: the nearest ancestor whose
+/// `package.json` names a package. Packages such as rimraf keep a
+/// `{"type": "module"}` stub next to their `dist/esm` bin, which is not the
+/// package root.
+fn owning_package(file: &Path) -> Option<(PathBuf, serde_json::Value)> {
+    file.ancestors().skip(1).find_map(|dir| {
+        let manifest = read_manifest(dir).ok()?;
+        manifest["name"].as_str()?;
+        Some((dir.to_path_buf(), manifest))
+    })
 }
 
 // ---- lifecycle scripts ------------------------------------------------------
@@ -1730,7 +1761,10 @@ fn run_lifecycle_scripts(
             {
                 plan.read_only_paths.push(node.clone());
             }
-            if !ctx.deny_network {
+            // Install scripts routinely fetch prebuilt binaries, so they keep
+            // the network unless the run denies it. The Windows backend has
+            // no outbound grant and refuses any plan that asks for one.
+            if !ctx.deny_network && !cfg!(windows) {
                 plan.network = oath_sandbox::NetworkMode::Inherit;
             }
             run_native(&plan, &launch, &env)?
@@ -2014,6 +2048,7 @@ mod tests {
                 name: "cowsay".into(),
             }],
             cooldown: None,
+            scripts_pending: false,
             records: BTreeMap::new(),
         };
         write_records(dir.path(), &records).unwrap();

@@ -20,10 +20,12 @@ const output = resolve(process.env.OATH_EXEC_PARITY_RESULTS ?? "compat-results/e
 const only = process.env.OATH_EXEC_PARITY_ONLY ? new Set(process.env.OATH_EXEC_PARITY_ONLY.split(",")) : null;
 const windows = process.platform === "win32";
 const npmCommand = windows ? "npm.cmd" : "npm";
-const npxCommand = windows ? "npx.cmd" : "npx";
 const timeout = Number(process.env.OATH_EXEC_PARITY_TIMEOUT_MS ?? 600_000);
 
-function run(command, args, cwd, home, extraEnv = {}) {
+// npm and npx are run as node scripts through process.execPath so fixture
+// arguments reach them verbatim on every platform: spawning `npx.cmd` needs a
+// shell on Windows, and a shell re-parses quotes, `&&`, and parentheses.
+function run(command, args, cwd, home, extraEnv = {}, { shell = false } = {}) {
   const started = Date.now();
   const result = spawnSync(command, args, {
     cwd,
@@ -31,7 +33,7 @@ function run(command, args, cwd, home, extraEnv = {}) {
     maxBuffer: 64 * 1024 * 1024,
     timeout,
     killSignal: "SIGKILL",
-    shell: windows && command.toLowerCase().endsWith(".cmd"),
+    shell,
     env: {
       ...process.env,
       CI: "1",
@@ -55,10 +57,16 @@ function run(command, args, cwd, home, extraEnv = {}) {
   };
 }
 
-const npmVersion = run(npmCommand, ["--version"], process.cwd(), tmpdir()).stdout.trim();
+const npmShell = { shell: windows };
+const npmVersion = run(npmCommand, ["--version"], process.cwd(), tmpdir(), {}, npmShell).stdout.trim();
 if (Number(npmVersion.split(".")[0]) !== referenceNpmMajor) {
   throw new Error(`npm ${referenceNpmMajor}.x is the exec parity reference; found ${npmVersion}`);
 }
+const npmRoot = run(npmCommand, ["root", "-g"], process.cwd(), tmpdir(), {}, npmShell).stdout.trim();
+const npmCli = join(npmRoot, "npm", "bin", "npm-cli.js");
+const npxCli = join(npmRoot, "npm", "bin", "npx-cli.js");
+const npm = (args, cwd, home, extraEnv) => run(process.execPath, [npmCli, ...args], cwd, home, extraEnv);
+const npx = (args, cwd, home, extraEnv) => run(process.execPath, [npxCli, ...args], cwd, home, extraEnv);
 
 const contract = JSON.parse(await readFile(fixtureFile, "utf8"));
 const results = [];
@@ -89,7 +97,7 @@ for (const testCase of contract.cases) {
       // Each tool installs the fixture's dependencies with its own installer
       // so the local-bin case runs from a tree the tool itself produced.
       setup = {
-        npx: run(npmCommand, ["install", "--ignore-scripts"], dirs.npx.cwd, dirs.npx.home),
+        npx: npm(["install", "--ignore-scripts"], dirs.npx.cwd, dirs.npx.home),
         oath: run(oath, ["install", "--ignore-scripts"], dirs.oath.cwd, dirs.oath.home)
       };
     }
@@ -98,7 +106,7 @@ for (const testCase of contract.cases) {
     let oathResult = null;
     const timings = [];
     for (let i = 0; i < repeat; i += 1) {
-      npxResult = run(npxCommand, expandArgs(npxArgs(testCase), { fixtures, cwd: dirs.npx.cwd }), dirs.npx.cwd, dirs.npx.home, testCase.env ?? {});
+      npxResult = npx(expandArgs(npxArgs(testCase), { fixtures, cwd: dirs.npx.cwd }), dirs.npx.cwd, dirs.npx.home, testCase.env ?? {});
       oathResult = run(oath, expandArgs(oathArgs(testCase), { fixtures, cwd: dirs.oath.cwd }), dirs.oath.cwd, dirs.oath.home, testCase.env ?? {});
       timings.push({ npx_ms: npxResult.elapsed_ms, oath_ms: oathResult.elapsed_ms });
     }

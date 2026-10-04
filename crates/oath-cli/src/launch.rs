@@ -111,8 +111,8 @@ pub fn walk_up_bin(dir: &Path, cmd: &str) -> Option<PathBuf> {
 }
 
 /// The bin-file candidates for `cmd` in one directory, in the order a
-/// shell (or on Windows, PATHEXT) would try them.
-fn command_in_dir(dir: &Path, cmd: &str) -> Option<PathBuf> {
+/// shell (or on Windows, PATHEXT) would try them. Never consults `PATH`.
+pub fn command_in_dir(dir: &Path, cmd: &str) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if cfg!(windows) {
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());

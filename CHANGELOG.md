@@ -6,7 +6,8 @@ All notable changes to oath are documented here. Format follows
 ## [Unreleased]
 
 ### Added
-- `oath x` is a full `npx` and `bunx` replacement. It resolves a command in
+- `oath x` covers the `npx` and `bunx` workflows (the gaps that remain are
+  listed under Phase 1 in `docs/FULL_REPLACEMENT_ROADMAP.md`). It resolves a command in
   libnpmexec's order (project bin, walk-up `node_modules/.bin`, global bin,
   package spec), accepts repeatable `--package`/`-p` and `--call`/`-c`,
   picks the bin with npm's `getBinFromManifest` rule, runs non-JavaScript
