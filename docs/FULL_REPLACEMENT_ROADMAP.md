@@ -545,6 +545,12 @@ case is reported but not required because it needs a reachable git host.
 Found and fixed on the way: Landlock rejected file-scoped grants (the Node
 binary), and the seccomp allowlist lacked the legacy filesystem syscalls
 libuv issues, so no sandboxed tool could write to its working directory.
+Exit gate as measured on the delivering machine (release build, Linux):
+33/33 required exec fixtures equivalent; warm `oath x` runs in 70–250 ms,
+within bunx's range and far below npx; cold runs take 1.3–3× npx's time
+(the Arborist planner process plus the static scan dominate), so the cold
+half of the gate is **not met** and is carried into Phase 4 (P-01 planner
+reuse, P-04 scan budget). macOS and Windows results come from the CI lane.
 
 Goal: anyone can alias `npx=oath x` and `bunx=oath x` and nothing breaks,
 while getting assessment and sandboxing.
