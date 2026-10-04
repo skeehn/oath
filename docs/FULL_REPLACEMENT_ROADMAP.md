@@ -25,14 +25,18 @@ commitments.
 npm Arborist plans the tree, Oath fetches and integrity-verifies every tarball,
 scans it, blocks dependency scripts by default, links `node_modules`
 atomically from a BLAKE3 content store, and records signed, versioned
-decisions. The `install`/`ci` path matches npm 11.12.1 on 100 reviewed
+decisions. The `install`/`ci` path matched npm 11.12.1 on 100 reviewed
 workflows, 250 pinned real projects, and 10,000 generated runs on three
-operating systems, but only with `--ignore-scripts` and only for `install`
-and `ci`. Exec has a native sandbox on Linux, macOS, and Windows that fails
+operating systems in the audited exact-master run `29499711576` (commit
+`803f788`, see `docs/RELEASE_READINESS.md`), but only with `--ignore-scripts`
+and only for `install` and `ci`. Later commits re-earn that claim only through
+their own exact-commit runs. Exec has a native sandbox on Linux, macOS, and Windows that fails
 closed. The registry, staging, signed contracts, and transparency log exist.
 
 **Why it is not yet a replacement.** Measured against what a developer does
-every day, Oath is missing or broken in ways that would make them leave:
+every day, Oath is missing or broken in ways that would make them leave. The
+table records the state at commit `5d71c0a`, before Phase 0; the Phase 0
+section below lists what has changed since.
 
 | Area | Status today |
 | --- | --- |
@@ -353,7 +357,7 @@ Status: **OK** implemented and evidenced, **Partial** exists with gaps,
 | Bin selection rule (`getBinFromManifest`) | yes | yes | Different (first alphabetical fallback) | X-01 |
 | Non-JS bins, shebang parsing | yes | yes | Missing (always `node <bin>`) | X-01 |
 | Cache keyed by spec hash under npm cache | yes | tmpdir per pkg, 24h TTL | temp dir per run | X-02 |
-| `cache npx ls|rm|info` | 11.2 | `pm cache rm` | Missing | X-02 |
+| `cache npx ls\|rm\|info` | 11.2 | `pm cache rm` | Missing | X-02 |
 | Prompt only on TTY and not in CI; `--yes/--no` | yes | n/a | Different (prompts only on High/Critical) | X-03 |
 | Rich prompt (size, publisher, score, capabilities) | no | no | Partial (findings only) | X-03 |
 | `npm init foo` → `create-foo` | yes | `bun create` | Missing | X-04 |

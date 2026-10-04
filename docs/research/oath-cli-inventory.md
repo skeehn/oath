@@ -195,6 +195,7 @@ There is no support for `_auth`, username/password, `always-auth`, `proxy`/`http
   - The temp directory leaks, because `std::process::exit` skips `TempDir` drop (`main.rs:3765`).
   - Dependencies' lifecycle scripts are **never run** in exec.
 - **Already in local `node_modules`:** if `./node_modules/.bin/<pkg_name>` exists (cwd only, matched by package name, not bin name), it runs directly **without scanning**, ignoring any version spec. This happens only when the sandbox is off and `--dry-run` is not set (`main.rs:3255-3266`).
+  - *Phase 0 update:* this path now calls `exec_local_bin`, which scans the package before launch, applies `--require-grade` and the findings prompt, and falls through to the registry when the installed version does not satisfy the requested spec. The sandbox-off, non-dry-run condition still selects it.
 - **Prompt:**
   - It prompts "run anyway? [y/N]" **only** when there are High/Critical findings and none of `--yes`, a prior approval, or `OATH_ALLOW_ALL` applies (`main.rs:3712-3725`). Otherwise it runs without prompting, unlike npx's install prompt.
   - `--json` never prompts. It prints the verdict and then **still executes** unless `--dry-run` is set or the grade gate trips, so stdout mixes the JSON with program output (`main.rs:3610-3661`).

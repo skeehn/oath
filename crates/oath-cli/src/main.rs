@@ -1174,7 +1174,7 @@ async fn cmd_ci() -> Result<()> {
         ArboristPlanner::plan(&cwd)?
     };
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let graph = placement_plan.to_dep_graph()?;
+    let mut graph = placement_plan.to_dep_graph()?;
     let planned_lock = Lockfile::from_graph_with_manifest(
         &graph,
         &lockfile.name,
@@ -1187,9 +1187,8 @@ async fn cmd_ci() -> Result<()> {
     }
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
-    let (to_download, cached) = missing_store_nodes(&graph, &store);
-    let download_summary =
-        download_missing_nodes(to_download, Arc::clone(&store), Arc::clone(&client)).await?;
+    let (download_summary, cached) =
+        download_and_prune(&mut placement_plan, &mut graph, &store, Arc::clone(&client)).await?;
     if download_summary.downloaded > 0 {
         println!(
             "  downloaded {} new ({})",
@@ -1275,7 +1274,7 @@ async fn cmd_install_workspace(
     println!("  planning npm-compatible workspace layout with Arborist...");
     let mut placement_plan = ArboristPlanner::plan(&ws.root)?;
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let graph = placement_plan.to_dep_graph()?;
+    let mut graph = placement_plan.to_dep_graph()?;
     let empty_dev_deps: HashMap<String, String> = HashMap::new();
 
     let resolve_time = start.elapsed();
@@ -1291,10 +1290,10 @@ async fn cmd_install_workspace(
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
 
-    let (to_download, cached) = missing_store_nodes(&graph, &store);
-    let summary = download_missing_nodes(to_download, Arc::clone(&store), Arc::clone(&client))
-        .await
-        .context("failed to download workspace dependencies")?;
+    let (summary, cached) =
+        download_and_prune(&mut placement_plan, &mut graph, &store, Arc::clone(&client))
+            .await
+            .context("failed to download workspace dependencies")?;
 
     let download_time = download_start.elapsed();
     if summary.downloaded > 0 {
@@ -1607,12 +1606,11 @@ async fn cmd_update(packages: Vec<String>) -> Result<()> {
         .collect();
     let mut placement_plan = ArboristPlanner::plan_with(&cwd, &PlacementRequest::update(names))?;
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let graph = placement_plan.to_dep_graph()?;
+    let mut graph = placement_plan.to_dep_graph()?;
 
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
-    let (to_download, _) = missing_store_nodes(&graph, &store);
-    download_missing_nodes(to_download, Arc::clone(&store), client).await?;
+    download_and_prune(&mut placement_plan, &mut graph, &store, client).await?;
     let linker = Linker::new((*store).clone());
     linker.link_placement_plan(&placement_plan, &cwd)?;
     placement_plan.write(&cwd.join(".oath").join("placement-plan.json"))?;
@@ -2878,6 +2876,25 @@ fn prune_failed_optional(
     }
 }
 
+/// Download every planned package missing from the store, then drop optional
+/// dependencies whose fetch failed from the plan and graph, as npm does. Every
+/// command that links a plan goes through here so a failed optional fetch
+/// never surfaces later as "planned package missing from verified store".
+/// Returns the download summary and how many planned packages were cached.
+async fn download_and_prune(
+    plan: &mut PlacementPlan,
+    graph: &mut DepGraph,
+    store: &Arc<ContentStore>,
+    client: Arc<RegistryClient>,
+) -> Result<(DownloadSummary, usize)> {
+    let (to_download, cached) = missing_store_nodes(graph, store);
+    let summary = download_missing_nodes(to_download, Arc::clone(store), client).await?;
+    if !summary.failed_optional.is_empty() {
+        prune_failed_optional(Some(plan), graph, &summary.failed_optional);
+    }
+    Ok((summary, cached))
+}
+
 /// A dependency whose install scripts are due to run, and where.
 struct ScriptTarget {
     name: String,
@@ -4004,11 +4021,10 @@ async fn cmd_exec(
     )?;
     let mut placement_plan = ArboristPlanner::plan(&exec_path)?;
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let graph = placement_plan.to_dep_graph()?;
+    let mut graph = placement_plan.to_dep_graph()?;
     let store2 = Arc::new(ContentStore::default_store()?);
     let registry = Arc::new(RegistryClient::default_client()?);
-    let (to_download, _) = missing_store_nodes(&graph, &store2);
-    download_missing_nodes(to_download, Arc::clone(&store2), registry).await?;
+    download_and_prune(&mut placement_plan, &mut graph, &store2, registry).await?;
     let linker = oath_store::Linker::new((*store2).clone());
     linker.link_placement_plan(&placement_plan, &exec_path)?;
     let pkg_dir = exec_path.join("node_modules").join(&pkg_name);
@@ -4795,12 +4811,12 @@ async fn cmd_remove(packages: Vec<String>) -> Result<()> {
                 .and_then(|d| d.as_object_mut())
             {
                 for package in &packages {
-                    deps.remove(&parse_package_spec(package).0);
+                    deps.shift_remove(&parse_package_spec(package).0);
                 }
             }
         }
     }
-    let graph = placement_plan.to_dep_graph()?;
+    let mut graph = placement_plan.to_dep_graph()?;
     let deps = extract_deps(&manifest_doc.value, "dependencies");
     let dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
     let project_name = manifest_doc.value["name"]
@@ -4814,8 +4830,7 @@ async fn cmd_remove(packages: Vec<String>) -> Result<()> {
 
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
-    let (to_download, _) = missing_store_nodes(&graph, &store);
-    download_missing_nodes(to_download, Arc::clone(&store), Arc::clone(&client)).await?;
+    download_and_prune(&mut placement_plan, &mut graph, &store, Arc::clone(&client)).await?;
     let linker = Linker::new((*store).clone()).with_external_link_targets(external_link_targets(
         &cwd,
         &manifest_doc.value,
@@ -5589,7 +5604,7 @@ async fn cmd_install_global(packages: Vec<String>, dry_run: bool) -> Result<()> 
     )?;
     let mut placement_plan = ArboristPlanner::plan(&global_dir)?;
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let graph = placement_plan.to_dep_graph()?;
+    let mut graph = placement_plan.to_dep_graph()?;
 
     println!(
         "  resolved {} packages in {:.1}s",
@@ -5600,10 +5615,10 @@ async fn cmd_install_global(packages: Vec<String>, dry_run: bool) -> Result<()> 
     // Download missing packages
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
-    let (to_download, _) = missing_store_nodes(&graph, &store);
-    let summary = download_missing_nodes(to_download, Arc::clone(&store), Arc::clone(&client))
-        .await
-        .context("failed to download global dependencies")?;
+    let (summary, _) =
+        download_and_prune(&mut placement_plan, &mut graph, &store, Arc::clone(&client))
+            .await
+            .context("failed to download global dependencies")?;
 
     if summary.downloaded > 0 {
         println!("  downloaded {} packages", summary.downloaded);

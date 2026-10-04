@@ -65,7 +65,9 @@ impl RootManifest {
                     object.insert(key.to_string(), serde_json::Value::Object(map.clone()));
                 }
                 None => {
-                    object.remove(key);
+                    // `remove` on an order-preserving map is a swap-remove and
+                    // would move the last key into this slot; keep the order.
+                    object.shift_remove(key);
                 }
             }
         }
@@ -514,6 +516,39 @@ fn validate_locations(plan: &PlacementPlan) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_manifest_apply_keeps_remaining_key_order_when_pruning_a_section() {
+        let mut manifest = serde_json::json!({
+            "name": "demo",
+            "dependencies": { "is-number": "^7.0.0" },
+            "scripts": { "test": "node test.js" },
+            "license": "UNLICENSED"
+        });
+        let saved = RootManifest {
+            dependencies: None,
+            dev_dependencies: Some(
+                serde_json::json!({ "typescript": "^5.0.0" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ),
+            optional_dependencies: None,
+            peer_dependencies: None,
+        };
+        saved.apply_to(&mut manifest);
+        let keys: Vec<&str> = manifest
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["name", "scripts", "license", "devDependencies"],
+            "pruned section must not reorder the keys that follow it"
+        );
+    }
     #[test]
     fn rejects_traversal_locations() {
         let plan = PlacementPlan {
