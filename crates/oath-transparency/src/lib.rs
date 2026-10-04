@@ -52,12 +52,12 @@ fn hash_entry(previous: &str, payload: &HashPayload<'_>) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(previous.as_bytes());
     hasher.update(serde_json::to_vec(payload)?);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn merkle_root(mut hashes: Vec<String>) -> String {
     if hashes.is_empty() {
-        return format!("{:x}", Sha256::digest([]));
+        return hex::encode(Sha256::digest([]));
     }
     while hashes.len() > 1 {
         if hashes.len() % 2 == 1 {
@@ -69,7 +69,7 @@ fn merkle_root(mut hashes: Vec<String>) -> String {
                 let mut hasher = Sha256::new();
                 hasher.update(pair[0].as_bytes());
                 hasher.update(pair[1].as_bytes());
-                format!("{:x}", hasher.finalize())
+                hex::encode(hasher.finalize())
             })
             .collect();
     }

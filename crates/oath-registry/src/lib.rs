@@ -170,7 +170,7 @@ pub(crate) fn now() -> u64 {
 }
 
 pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 pub(crate) fn registry_signing_key(path: &Path) -> Result<SigningKey> {
@@ -216,7 +216,7 @@ fn hash_leaf(leaf: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update([0]);
     hasher.update(leaf.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn hash_children(left: &str, right: &str) -> String {
@@ -224,7 +224,7 @@ fn hash_children(left: &str, right: &str) -> String {
     hasher.update([1]);
     hasher.update(left.as_bytes());
     hasher.update(right.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn split_point(length: usize) -> usize {
