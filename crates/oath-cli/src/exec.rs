@@ -261,7 +261,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
     if let Some(local) = local_tree_match(&ctx, &opts, &specs).await? {
         let first = &local[0];
         if swap {
-            args[0] = bin_from_manifest(&first.manifest)?;
+            swap_command(&mut args, &first.manifest, &opts)?;
         }
         let target = Target {
             name: first.name.clone(),
@@ -277,7 +277,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
             &target,
             &registry,
             false,
-            args.first().map(String::as_str),
+            command_name_of(&args),
         )? {
             Gate::Exit(code) => return Ok(code),
             Gate::Proceed(record) => record,
@@ -341,7 +341,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
     let command_dir = entry.join("node_modules").join(&command_name);
     let command_manifest = read_manifest(&command_dir)?;
     if swap {
-        args[0] = bin_from_manifest(&command_manifest)?;
+        swap_command(&mut args, &command_manifest, &opts)?;
     }
     let bin_dirs = vec![entry.join("node_modules").join(".bin")];
     let version = command_manifest["version"]
@@ -389,7 +389,7 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
             &target,
             &registry,
             fresh_install,
-            args.first().map(String::as_str),
+            command_name_of(&args),
         )? {
             Gate::Exit(code) => return Ok(code),
             Gate::Proceed(record) => {
@@ -446,6 +446,33 @@ fn cooldown_violation(ctx: &ExecContext, name: &str, published_at: Option<&str>)
 }
 
 // ---- resolution -------------------------------------------------------------
+
+/// Replace the package spec in `args[0]` with the bin npm's rule selects. An
+/// assessment-only run (`--dry-run`) may inspect a package that declares no
+/// usable bin, such as a library; the command is then left empty.
+fn swap_command(
+    args: &mut [String],
+    manifest: &serde_json::Value,
+    opts: &ExecOptions,
+) -> Result<()> {
+    match bin_from_manifest(manifest) {
+        Ok(bin) => {
+            args[0] = bin;
+            Ok(())
+        }
+        Err(_) if opts.dry_run => {
+            args[0].clear();
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn command_name_of(args: &[String]) -> Option<&str> {
+    args.first()
+        .map(String::as_str)
+        .filter(|cmd| !cmd.is_empty())
+}
 
 /// A bin the local project itself declares.
 fn project_bin(prefix: &Path, cmd: &str) -> Result<Option<PathBuf>> {
