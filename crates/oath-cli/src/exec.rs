@@ -724,11 +724,15 @@ fn map_added(specs: &[ExecSpec], added: &[AddedSpec], entry: &Path) -> Result<Ve
         let position = match &spec.kind {
             SpecKind::Registry { name, .. } => remaining.iter().position(|a| &a.name == name),
             SpecKind::Directory(path) | SpecKind::File(path) => remaining.iter().position(|a| {
+                // Compare canonical forms on both sides: the spec path has its
+                // Windows verbatim prefix stripped, the planner's `file:` path
+                // is relative to the entry.
+                let wanted = std::fs::canonicalize(path).ok();
                 a.raw
                     .strip_prefix("file:")
                     .map(|rel| entry.join(rel))
                     .and_then(|p| std::fs::canonicalize(p).ok())
-                    .is_some_and(|resolved| &resolved == path)
+                    .is_some_and(|resolved| Some(resolved) == wanted)
                     || a.raw == spec.raw
             }),
             SpecKind::Git(raw) | SpecKind::Remote(raw) => {

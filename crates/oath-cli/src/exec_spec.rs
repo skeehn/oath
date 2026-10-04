@@ -173,6 +173,9 @@ fn local_spec(raw: &str, path: &str, cwd: &Path) -> Result<ExecSpec> {
     };
     let absolute = std::fs::canonicalize(&absolute)
         .with_context(|| format!("local package {} does not exist", absolute.display()))?;
+    // Windows canonical paths carry a `\\?\` prefix that Node, npm-package-arg,
+    // and Arborist do not accept; hand them the plain drive path.
+    let absolute = without_verbatim_prefix(absolute);
     let kind = if absolute.is_dir() {
         SpecKind::Directory(absolute)
     } else if is_tarball_name(&absolute) {
@@ -187,6 +190,19 @@ fn local_spec(raw: &str, path: &str, cwd: &Path) -> Result<ExecSpec> {
         raw: raw.to_string(),
         kind,
     })
+}
+
+/// Strip the Windows verbatim prefix (`\\?\C:\...` or `\\?\UNC\host\share`)
+/// that `canonicalize` adds, leaving the path the rest of the toolchain uses.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(plain) => PathBuf::from(plain),
+        None => path,
+    }
 }
 
 fn is_tarball_name(path: &Path) -> bool {
@@ -484,6 +500,22 @@ mod tests {
         let spec = ExecSpec::parse("file:pkg.tgz", dir.path()).unwrap();
         assert!(matches!(spec.kind, SpecKind::File(_)));
         assert!(ExecSpec::parse("./missing", dir.path()).is_err());
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_removed() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\D:\a\pkg")),
+            PathBuf::from(r"D:\a\pkg")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\host\share\pkg")),
+            PathBuf::from(r"\\host\share\pkg")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from("/tmp/pkg")),
+            PathBuf::from("/tmp/pkg")
+        );
     }
 
     #[test]
