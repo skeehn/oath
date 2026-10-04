@@ -1498,6 +1498,8 @@ mod tests {
         assert!(!live.join("stale").exists());
     }
 
+    // Used only by the POSIX-specific bin-linking tests below.
+    #[cfg(unix)]
     fn test_plan(project: &Path, nodes: Vec<PlacementNode>) -> PlacementPlan {
         PlacementPlan {
             schema_version: 2,
@@ -1513,6 +1515,8 @@ mod tests {
         }
     }
 
+    // Used only by the POSIX-specific bin-linking tests below.
+    #[cfg(unix)]
     fn test_node(location: &str, install_name: &str, name: &str, version: &str) -> PlacementNode {
         PlacementNode {
             location: location.into(),
@@ -1531,6 +1535,8 @@ mod tests {
         }
     }
 
+    // Used only by the POSIX-specific bin-linking tests below.
+    #[cfg(unix)]
     fn store_bin_package(store: &ContentStore, root: &Path, name: &str, bin: &str) {
         let extracted = root.join(format!("extracted-{}", name.replace('/', "__")));
         std::fs::create_dir_all(extracted.join("bin")).unwrap();
