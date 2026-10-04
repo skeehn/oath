@@ -51,3 +51,19 @@ Known intentional fail-closed boundary: git dependencies must use an exact branc
 tag, or commit. npm-style `#semver:` git selectors are rejected with a stable
 error instead of silently resolving a moving `HEAD`; exact tag-range resolution
 remains outside the current supported slice.
+
+The tree comparison includes `node_modules/.bin` entries on POSIX hosts: each
+bin link must exist with the same name and the same relative target npm wrote.
+Windows comparisons still exclude the shim directory because Oath does not yet
+write npm's `cmd-shim` files there. The comparison also requires that neither
+installer rewrote the fixture's `package.json` on a plain install or ci.
+
+Known gaps still outside the executed contract (tracked in
+`docs/FULL_REPLACEMENT_ROADMAP.md`): the parity harness runs `install` and `ci`
+with `--ignore-scripts` only; `run`, `exec`, lifecycle scripts, `.npmrc`
+beyond registry and token keys, `package-lock.json` output, and workspace
+filter flags are not yet differentially tested. The optional
+`OATH_COMPAT_INTEROP=1` probe records whether `npm install` after
+`oath install` leaves the tree unchanged; it is reported, not required, until
+Oath writes `package-lock.json` itself.
+

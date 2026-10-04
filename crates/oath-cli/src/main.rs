@@ -26,6 +26,7 @@ use oath_workspace::{WorkspaceRoot, detect_workspace_root};
 
 mod approvals;
 mod exec_assessment;
+mod manifest;
 mod package_transfer;
 mod prompts;
 mod publish_assessment;
@@ -201,7 +202,9 @@ enum Commands {
     #[command(visible_alias = "x")]
     Exec {
         package: String,
-        #[arg(trailing_var_arg = true)]
+        /// Arguments passed to the package binary; flags after the package
+        /// name belong to it, as with npx (`oath x tsc --version`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
         /// Skip the risk prompt and run without asking (like npm's --yes)
         #[arg(short = 'y', long)]
@@ -331,6 +334,14 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, so `oath graph | head` would panic on the first
+    // write after the reader exits. Restore the default so the process exits
+    // quietly like every other CLI.
+    #[cfg(unix)]
+    // SAFETY: setting a signal disposition before any thread is spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .without_time()
@@ -417,7 +428,9 @@ async fn main() -> Result<()> {
             allow_degraded_sandbox,
             remember,
         } => {
-            cmd_exec(
+            // cmd_exec returns the child's exit status instead of exiting
+            // itself so its temporary install directory is dropped first.
+            let code = cmd_exec(
                 &package,
                 &args,
                 yes,
@@ -433,6 +446,9 @@ async fn main() -> Result<()> {
                 remember,
             )
             .await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Commands::Score { package } => {
             cmd_score(&package).await?;
@@ -582,63 +598,54 @@ async fn cmd_install(
 
     // ---- Single-package install ---------------------------------------------
 
-    let mut pending_manifest: Option<serde_json::Value> = None;
-    let mut added_package_names: Vec<String> = Vec::new();
-    let (deps, dev_deps, project_name, project_version) = if packages.is_empty() {
-        let pkg = read_package_json()?;
-        let name = pkg["name"].as_str().unwrap_or("unnamed").to_string();
-        let version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
-        let deps = extract_deps(&pkg, "dependencies");
-        let dev_deps = extract_deps(&pkg, "devDependencies");
-        (deps, dev_deps, name, version)
-    } else {
-        let mut pkg: serde_json::Value = if PathBuf::from("package.json").exists() {
-            read_package_json()?
-        } else {
-            serde_json::json!({"name": "project", "version": "1.0.0"})
-        };
-        let dep_key = if dev {
-            "devDependencies"
-        } else {
-            "dependencies"
-        };
-        if pkg.get(dep_key).is_none() {
-            pkg[dep_key] = serde_json::json!({});
-        }
-        for spec in &packages {
-            let (name, version) = parse_package_spec(spec);
-            pkg[dep_key][&name] = serde_json::Value::String(version);
-            added_package_names.push(name);
-        }
-        let name = pkg["name"].as_str().unwrap_or("project").to_string();
-        let version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
-        let deps = extract_deps(&pkg, "dependencies");
-        let dev_deps = extract_deps(&pkg, "devDependencies");
-        pending_manifest = Some(pkg);
-        (deps, dev_deps, name, version)
-    };
-
-    let trusted_deps: HashSet<String> = {
-        let pkg = pending_manifest
-            .clone()
-            .unwrap_or_else(|| read_package_json().unwrap_or_default());
-        pkg.get("trustedDependencies")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    let total_direct = deps.len() + dev_deps.len();
-
     // npm Arborist is the authoritative placement planner for ordinary
     // package.json installs. Oath retains ownership of fetch, integrity,
     // scanning, CAS materialization, lifecycle policy, and atomic commit.
     // Keep the former resolver available only as an explicit diagnostic canary.
     let use_arborist = std::env::var("OATH_RESOLVER").as_deref() != Ok("legacy");
+
+    let manifest_path = PathBuf::from("package.json");
+    if packages.is_empty() {
+        // A plain install needs a manifest; surface the standard error.
+        read_package_json()?;
+    }
+    let mut manifest_doc = manifest::PackageJsonDocument::load_or_default(
+        &manifest_path,
+        serde_json::json!({"name": "project", "version": "1.0.0"}),
+    )?;
+    // Legacy-resolver canary only: it has no planner to tell us what npm would
+    // save, so pre-write the command-line specs and fix them up after resolution.
+    let mut legacy_added: Vec<String> = Vec::new();
+    if !packages.is_empty() && !use_arborist {
+        let dep_key = if dev {
+            "devDependencies"
+        } else {
+            "dependencies"
+        };
+        if manifest_doc.value.get(dep_key).is_none() {
+            manifest_doc.value[dep_key] = serde_json::json!({});
+        }
+        for spec in &packages {
+            let (name, version) = parse_package_spec(spec);
+            manifest_doc.value[dep_key][&name] = serde_json::Value::String(version);
+            legacy_added.push(name);
+        }
+    }
+    let project_name = manifest_doc.value["name"]
+        .as_str()
+        .unwrap_or(if packages.is_empty() {
+            "unnamed"
+        } else {
+            "project"
+        })
+        .to_string();
+    let project_version = manifest_doc.value["version"]
+        .as_str()
+        .unwrap_or("0.0.0")
+        .to_string();
+    let total_direct = extract_deps(&manifest_doc.value, "dependencies").len()
+        + extract_deps(&manifest_doc.value, "devDependencies").len();
+
     let placement_plan: Option<PlacementPlan> = if use_arborist {
         println!("oath: planning npm-compatible layout with Arborist...");
         let request = if packages.is_empty() {
@@ -654,10 +661,30 @@ async fn cmd_install(
             plan.planner.name,
             plan.planner.npm
         );
+        // Arborist computed exactly what npm would write to package.json for
+        // this add request (save-prefix ranges, npm: aliases, git shortcuts,
+        // relative file: paths). Apply it before anything derives from the
+        // manifest.
+        if let Some(root_manifest) = &plan.root_manifest {
+            root_manifest.apply_to(&mut manifest_doc.value);
+        }
         Some(plan)
     } else {
         None
     };
+
+    let deps = extract_deps(&manifest_doc.value, "dependencies");
+    let dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
+    let trusted_deps: HashSet<String> = manifest_doc
+        .value
+        .get("trustedDependencies")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Fast path: if lockfile exists, matches package.json, and all store entries
     // are present, skip registry resolution.
@@ -722,16 +749,19 @@ async fn cmd_install(
 
     let mut lock_deps = deps.clone();
     let mut lock_dev_deps = dev_deps.clone();
-    if let Some(pkg_json) = pending_manifest.as_mut() {
+    if !legacy_added.is_empty() {
         let dep_key = if dev {
             "devDependencies"
         } else {
             "dependencies"
         };
-        for pkg_name in &added_package_names {
-            let requested_spec = pkg_json[dep_key][pkg_name].as_str().unwrap_or("latest");
-            let final_spec = dependency_manifest_spec(pkg_name, requested_spec, &graph);
-            pkg_json[dep_key][pkg_name] = serde_json::Value::String(final_spec.clone());
+        for pkg_name in &legacy_added {
+            let requested_spec = manifest_doc.value[dep_key][pkg_name]
+                .as_str()
+                .unwrap_or("latest")
+                .to_string();
+            let final_spec = dependency_manifest_spec(pkg_name, &requested_spec, &graph);
+            manifest_doc.value[dep_key][pkg_name] = serde_json::Value::String(final_spec.clone());
             if dev {
                 lock_dev_deps.insert(pkg_name.clone(), final_spec);
             } else {
@@ -765,12 +795,22 @@ async fn cmd_install(
         run_root_lifecycle("preinstall");
     }
 
+    // Load policy (project-local oath-policy.toml + global ~/.oath/policy.toml)
+    // before anything is fetched: a banned package never reaches the store.
+    let policy = OathPolicy::load();
+    enforce_banned_packages(&policy, &graph)?;
+
     // Download -- parallel with JoinSet
     let download_start = Instant::now();
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
 
     let (to_download, cached) = missing_store_nodes(&graph, &store);
+    // Policy applies to everything new to this project, whether or not the
+    // machine's store already held a copy, plus everything freshly fetched.
+    let previous_lock = Lockfile::read(&lock_path).ok();
+    let new_nodes: Vec<DepNode> =
+        nodes_new_to_project(&graph, previous_lock.as_ref(), &to_download);
 
     // ---- Minimum release age (supply-chain cooldown) ------------------------
     // Block newly-added versions published more recently than --min-age. Only
@@ -869,11 +909,49 @@ async fn cmd_install(
         println!("  {} already cached", cached);
     }
 
+    // npm drops an optional dependency whose fetch failed and keeps going.
+    let mut placement_plan = placement_plan;
+    let mut graph = graph;
+    let new_nodes = if download_summary.failed_optional.is_empty() {
+        new_nodes
+    } else {
+        prune_failed_optional(
+            placement_plan.as_mut(),
+            &mut graph,
+            &download_summary.failed_optional,
+        );
+        let failed: HashSet<_> = download_summary
+            .failed_optional
+            .iter()
+            .map(|f| (f.name.as_str(), f.version.as_str(), f.resolved.as_str()))
+            .collect();
+        new_nodes
+            .into_iter()
+            .filter(|n| {
+                !failed.contains(&(n.name.as_str(), n.version.as_str(), n.resolved.as_str()))
+            })
+            .collect()
+    };
+
+    // ---- Policy gate: everything new is assessed before it is linked -------
+    // License policy, static analysis, and the risk ceiling all run against the
+    // verified store copy, so nothing reaches node_modules unassessed and no
+    // lifecycle hook can run before this point.
+    enforce_banned_licenses(&policy, &new_nodes, &store)?;
+    if run_audit && !new_nodes.is_empty() {
+        println!("  scanning {} new packages...", new_nodes.len());
+        let reports = scan_nodes(&new_nodes, &store);
+        report_scan_results(&reports);
+        enforce_max_risk(&policy, &reports)?;
+    }
+    require_policy_approvals(&policy, &new_nodes, yes_flag)?;
+
     // Link
     let link_start = Instant::now();
     let store_ref = Arc::clone(&store);
-    let linker = Linker::new((*store_ref).clone());
     let cwd = std::env::current_dir()?;
+    let linker = Linker::new((*store_ref).clone())
+        .with_external_link_targets(external_link_targets(&cwd, &manifest_doc.value, None));
     let link_result = if let Some(plan) = placement_plan.as_ref() {
         linker.link_placement_plan(plan, &cwd)?
     } else {
@@ -889,14 +967,22 @@ async fn cmd_install(
         link_time.as_secs_f64()
     );
 
-    // Write lockfile
+    // Write lockfile. The lock is rebuilt here because an optional
+    // dependency may have been pruned after the frozen comparison above.
+    let lockfile = Lockfile::from_graph_with_manifest(
+        &graph,
+        &project_name,
+        &project_version,
+        &lock_deps,
+        &lock_dev_deps,
+    );
     if !frozen_lockfile {
         lockfile.write(&PathBuf::from("oath-lock.json"))?;
     }
 
-    // Write package.json manifest if packages were explicitly specified.
-    if let Some(pkg_json) = pending_manifest {
-        std::fs::write("package.json", serde_json::to_string_pretty(&pkg_json)?)?;
+    // Write package.json only for an add request, exactly as npm would.
+    if !packages.is_empty() {
+        manifest_doc.save()?;
     }
 
     // -- Peer dependency warnings ---------------------------------------------
@@ -929,161 +1015,77 @@ async fn cmd_install(
         }
     }
 
-    // -- Install script permission prompts ------------------------------------
-    // Load policy (project-local oath-policy.toml + global ~/.oath/policy.toml)
-    let policy = OathPolicy::load();
-
+    // -- Dependency install scripts ------------------------------------------
+    // Run after the policy gate and the atomic link, in dependency order, only
+    // for placements Arborist reported as added or changed, and always inside
+    // the package's real install location (never the shared store).
     let mut scripts_blocked = 0;
-    for node in graph.nodes.values() {
-        if ignore_scripts || !node.has_install_script {
-            continue;
-        }
-
-        // Policy hard-block
-        if policy.is_package_banned(&node.name) {
-            println!(
-                "  oath: blocked install script for banned package {}@{}",
-                node.name, node.version
-            );
-            continue;
-        }
-
-        // Run scripts from the linked node_modules location so that optional platform
-        // packages (e.g. @esbuild/darwin-arm64) are resolvable via sibling node_modules.
-        // Fall back to the store dir if the linked path doesn't exist.
-        let install_name = node.alias.as_deref().unwrap_or(&node.name);
-        let linked_pkg_dir = cwd.join("node_modules").join(install_name);
-        let store_pkg_dir = store.package_dir_for(
-            &node.name,
-            &node.version,
-            Some(&node.resolved),
-            node.integrity.as_deref(),
-        );
-        let pkg_dir = if linked_pkg_dir.exists() {
-            linked_pkg_dir
-        } else {
-            store_pkg_dir
-        };
-
-        // Trusted: run without prompting
-        if trusted_deps.contains(&node.name) || yes_flag {
-            if pkg_dir.exists() {
-                run_install_script(&node.name, &pkg_dir);
-            }
-            continue;
-        }
-
-        // --run-scripts: prompt for each (old behavior)
-        if run_scripts {
+    if !ignore_scripts {
+        let targets = install_script_targets(placement_plan.as_ref(), &graph, &cwd);
+        for target in targets {
+            let pkg_dir = &target.dir;
             if !pkg_dir.exists() {
                 continue;
             }
-            let report = match PackageScanner::scan(&node.name, &node.version, &pkg_dir) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let script_display =
-                detect_install_script(&pkg_dir).unwrap_or_else(|| "node install.js".to_string());
-            let decision = prompts::prompt_install_script(
-                &node.name,
-                &node.version,
-                &script_display,
-                &report.capabilities,
-                false,
-                &policy,
-            );
-            match decision {
-                prompts::ScriptDecision::Allow | prompts::ScriptDecision::Always => {
-                    run_install_script(&node.name, &pkg_dir);
-                }
-                prompts::ScriptDecision::Deny => {}
-            }
-            continue;
-        }
+            let policy_allowlisted = policy
+                .allow_install_scripts
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&target.name));
+            let trusted = trusted_deps.contains(&target.name) || policy_allowlisted;
 
-        // Default: BLOCK (silent, just count)
-        scripts_blocked += 1;
+            if trusted {
+                run_install_script(&target.name, pkg_dir);
+                continue;
+            }
+            // `block_install_scripts = true` is an explicit policy: only the
+            // allow-list may run, and neither --yes nor a prompt overrides it.
+            if policy.block_install_scripts {
+                scripts_blocked += 1;
+                continue;
+            }
+            if yes_flag {
+                run_install_script(&target.name, pkg_dir);
+                continue;
+            }
+            if run_scripts {
+                let report = match PackageScanner::scan(&target.name, &target.version, pkg_dir) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let script_display =
+                    detect_install_script(pkg_dir).unwrap_or_else(|| "node install.js".to_string());
+                let decision = prompts::prompt_install_script(
+                    &target.name,
+                    &target.version,
+                    &script_display,
+                    &report.capabilities,
+                    false,
+                    &policy,
+                );
+                match decision {
+                    prompts::ScriptDecision::Allow | prompts::ScriptDecision::Always => {
+                        run_install_script(&target.name, pkg_dir);
+                    }
+                    prompts::ScriptDecision::Deny => {}
+                }
+                continue;
+            }
+            // Default: BLOCK (silent, just count)
+            scripts_blocked += 1;
+        }
     }
 
     if scripts_blocked > 0 {
-        println!(
-            "  {} install script(s) blocked (add to trustedDependencies or use --run-scripts)",
-            scripts_blocked
-        );
-    }
-
-    // Static analysis on newly downloaded packages
-    if run_audit && downloaded > 0 {
-        println!("  scanning {} new packages...", downloaded);
-        // Scan new packages in parallel -- each scan is independent and
-        // CPU-bound (oxc AST parse), so this is the cold-install hot path.
-        let nodes: Vec<_> = graph.nodes.values().collect();
-        let scanned: Vec<_> = nodes
-            .par_iter()
-            .filter_map(|node| {
-                let pkg_dir = store.package_dir_for(
-                    &node.name,
-                    &node.version,
-                    Some(&node.resolved),
-                    node.integrity.as_deref(),
-                );
-                if !pkg_dir.exists() {
-                    return None;
-                }
-                match PackageScanner::scan(&node.name, &node.version, &pkg_dir) {
-                    Ok(r) => Some((node.name.as_str(), node.version.as_str(), r)),
-                    Err(_) => None,
-                }
-            })
-            .collect();
-
-        let mut critical = 0usize;
-        let mut high = 0usize;
-        // Reporting is serial -- deterministic, ordered output.
-        for (name, version, report) in &scanned {
-            // Tiered behavioral verdict: capabilities are neutral; only dangerous
-            // combinations escalate. Critical = Block-tier, High = Warn-tier.
-            match report.overall_risk {
-                RiskLevel::Critical => {
-                    critical += 1;
-                    println!();
-                    println!("  \u{26d4} flagged  {name}@{version}");
-                    for r in &report.verdict_reasons {
-                        println!("       - {r}");
-                    }
-                    let caps = fmt_capabilities(&report.capabilities);
-                    if !caps.is_empty() {
-                        println!("       capabilities: {caps}");
-                    }
-                }
-                RiskLevel::High => {
-                    high += 1;
-                    println!(
-                        "  \u{26a0}  warn     {name}@{version} -- {}",
-                        report
-                            .verdict_reasons
-                            .first()
-                            .map(|s| s.as_str())
-                            .unwrap_or("flagged behavior")
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        if critical > 0 {
-            println!();
+        if policy.block_install_scripts {
             println!(
-                "  {} package(s) flagged (review with `oath perms <pkg>` / `oath scan`)",
-                critical
-            );
-        } else if high > 0 {
-            println!(
-                "  {} warning(s) -- run `oath scan --verbose` for details",
-                high
+                "  {} install script(s) blocked by policy (block_install_scripts; add to allow_install_scripts)",
+                scripts_blocked
             );
         } else {
-            println!("  all clear");
+            println!(
+                "  {} install script(s) blocked (add to trustedDependencies or use --run-scripts)",
+                scripts_blocked
+            );
         }
     }
 
@@ -1118,20 +1120,40 @@ async fn cmd_install(
 
 async fn cmd_ci() -> Result<()> {
     let start = Instant::now();
-    let lock_path = PathBuf::from("oath-lock.json");
+    // In a workspace the lock lives at the root and snapshots the merged
+    // external dependencies of every member, exactly as the workspace install
+    // wrote them; compare against that, not against the root manifest alone.
+    let invoked_from = std::env::current_dir()?.canonicalize()?;
+    let workspace = detect_workspace_root(&invoked_from);
+    let cwd = workspace
+        .as_ref()
+        .map(|ws| ws.root.clone())
+        .unwrap_or_else(|| invoked_from.clone());
+    let lock_path = cwd.join("oath-lock.json");
     if !lock_path.exists() {
         anyhow::bail!("no lockfile found, run oath install first");
     }
 
-    let pkg = read_package_json()?;
-    let deps = extract_deps(&pkg, "dependencies");
-    let dev_deps = extract_deps(&pkg, "devDependencies");
+    let pkg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cwd.join("package.json"))
+            .context("no package.json found (run `oath init` to create one)")?,
+    )
+    .context("failed to parse package.json")?;
+    let (deps, dev_deps) = match workspace.as_ref() {
+        Some(ws) => {
+            println!("oath ci: workspace mode, {} packages", ws.packages.len());
+            (ws.collect_external_deps(true).0, HashMap::new())
+        }
+        None => (
+            extract_deps(&pkg, "dependencies"),
+            extract_deps(&pkg, "devDependencies"),
+        ),
+    };
     let lockfile = Lockfile::read(&lock_path)?;
     if !lockfile.matches_manifest(&deps, &dev_deps) {
         anyhow::bail!("package.json does not match oath-lock.json, run oath install first");
     }
 
-    let cwd = std::env::current_dir()?.canonicalize()?;
     let plan_path = cwd.join(".oath").join("placement-plan.json");
     let mut placement_plan = if plan_path.exists() {
         PlacementPlan::read(&plan_path)?
@@ -1166,7 +1188,11 @@ async fn cmd_ci() -> Result<()> {
         println!("  {} already cached", cached);
     }
 
-    let linker = Linker::new((*store).clone());
+    let linker = Linker::new((*store).clone()).with_external_link_targets(external_link_targets(
+        &cwd,
+        &pkg,
+        workspace.as_ref(),
+    ));
     let link_result = linker.link_placement_plan_clean(&placement_plan, &cwd)?;
     placement_plan.write(&plan_path)?;
     println!("  linked {} packages", link_result.linked);
@@ -1273,7 +1299,12 @@ async fn cmd_install_workspace(
     // Link into root node_modules
     let link_start = Instant::now();
     let store_ref = Arc::clone(&store);
-    let linker = Linker::new((*store_ref).clone());
+    let root_manifest: serde_json::Value = std::fs::read_to_string(ws.root.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let linker = Linker::new((*store_ref).clone())
+        .with_external_link_targets(external_link_targets(&ws.root, &root_manifest, Some(ws)));
     let link_result = linker.link_placement_plan(&placement_plan, &ws.root)?;
     placement_plan.write(&ws.root.join(".oath").join("placement-plan.json"))?;
     let link_time = link_start.elapsed();
@@ -1814,10 +1845,14 @@ fn cmd_init(name: Option<&str>) -> Result<()> {
         "keywords": [],
         "license": "UNLICENSED"
     });
-    let content = serde_json::to_string_pretty(&pkg)?;
+    anyhow::ensure!(
+        !PathBuf::from("package.json").exists(),
+        "package.json already exists in this directory; edit it directly or run `oath init` in an empty project"
+    );
+    let content = format!("{}\n", serde_json::to_string_pretty(&pkg)?);
     std::fs::write("package.json", &content)?;
     println!("oath init: created package.json");
-    println!("{content}");
+    print!("{content}");
     Ok(())
 }
 
@@ -1829,48 +1864,20 @@ fn cmd_why(package: &str) -> Result<()> {
         println!("oath why: no oath-lock.json found (run `oath install` first)");
         return Ok(());
     }
-    let content = std::fs::read_to_string(&lock_path)?;
-    let lock: serde_json::Value = serde_json::from_str(&content)?;
+    let lockfile = Lockfile::read(&lock_path)?;
+    if lockfile.packages.is_empty() {
+        println!("oath why: oath-lock.json has no packages");
+        return Ok(());
+    }
+    let view = LockView::new(&lockfile);
 
-    let packages = match lock.get("packages").and_then(|p| p.as_object()) {
-        Some(p) => p,
-        None => {
-            println!("oath why: oath-lock.json has no packages");
-            return Ok(());
-        }
-    };
-
-    // Find all keys that match the package name (any version)
-    let mut matches: Vec<(&str, &serde_json::Value)> = packages
-        .iter()
-        .filter(|(key, _)| {
-            let k = key.as_str();
-            k == package || k.starts_with(&format!("{package}@"))
-        })
-        .map(|(k, v)| (k.as_str(), v))
-        .collect();
-
+    let mut matches: Vec<&str> = view.keys_for_name(package);
     if matches.is_empty() {
         println!("oath why: '{package}' not found in oath-lock.json");
         return Ok(());
     }
+    matches.sort();
 
-    // Build reverse dependency map: pkg_key -> Vec<pkg_key that depends on it>
-    let mut rdeps: HashMap<String, Vec<String>> = HashMap::new();
-    for (key, node) in packages.iter() {
-        if let Some(deps) = node.get("dependencies").and_then(|d| d.as_object()) {
-            for (dep_name, dep_ver) in deps.iter() {
-                let dep_ver_str = dep_ver.as_str().unwrap_or("");
-                let dep_key = format!("{dep_name}@{dep_ver_str}");
-                rdeps.entry(dep_key).or_default().push(key.clone());
-            }
-        }
-    }
-
-    // Determine roots from lockfile (packages with no reverse deps or explicit roots)
-    let all_keys: HashSet<&str> = packages.keys().map(|k| k.as_str()).collect();
-
-    // Read direct deps from package.json if available
     let direct_deps: HashSet<String> = if PathBuf::from("package.json").exists() {
         let pkg = read_package_json().unwrap_or(serde_json::json!({}));
         let mut d = extract_deps(&pkg, "dependencies");
@@ -1880,44 +1887,40 @@ fn cmd_why(package: &str) -> Result<()> {
         HashSet::new()
     };
 
-    // For each matched package, trace path to root
-    matches.sort_by_key(|(k, _)| *k);
-    for (key, node) in &matches {
-        let name = node.get("name").and_then(|n| n.as_str()).unwrap_or(package);
-        let version = node.get("version").and_then(|v| v.as_str()).unwrap_or("?");
-        let has_install = node
-            .get("hasInstallScript")
-            .or_else(|| node.get("has_install_script"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
+    for key in matches {
+        let entry = &lockfile.packages[key];
+        let name = view.name_of(key);
+        let install_name = entry.alias.clone().unwrap_or_else(|| name.clone());
+        let version = entry.version.as_str();
         println!("  {name}@{version}");
+        if install_name != name {
+            println!("    installed as: {install_name}");
+        }
+        if !key.contains('@') || key.starts_with("node_modules/") {
+            println!("    location: {key}");
+        }
 
-        // Check if it's a direct dependency
-        if direct_deps.contains(name) {
+        if direct_deps.contains(&install_name) || lockfile.roots.contains(&key.to_string()) {
             println!("    why: required by your package.json (direct dependency)");
         } else {
-            // BFS to find shortest path to root (node with no reverse deps)
-            let path = find_dep_path(key, &rdeps, &all_keys);
+            let path = view.path_to_root(key);
             if path.is_empty() {
                 println!("    why: required by (unknown)");
             } else {
-                let chain = path.join(" -> ");
-                println!("    why: required by {chain} -> root");
+                let chain: Vec<String> = path.iter().map(|k| view.display(k)).collect();
+                println!("    why: required by {} -> root", chain.join(" -> "));
             }
         }
 
-        // Scan from store for capabilities/risk
         let store = ContentStore::default_store()?;
         let pkg_dir = store.package_dir_for(
-            name,
+            &name,
             version,
-            node.get("resolved").and_then(|value| value.as_str()),
-            node.get("integrity").and_then(|value| value.as_str()),
+            Some(&entry.resolved),
+            entry.integrity.as_deref(),
         );
-
         if pkg_dir.exists() {
-            match PackageScanner::scan(name, version, &pkg_dir) {
+            match PackageScanner::scan(&name, version, &pkg_dir) {
                 Ok(report) => {
                     println!("    risk: {}", report.overall_risk);
                     println!(
@@ -1926,59 +1929,140 @@ fn cmd_why(package: &str) -> Result<()> {
                     );
                     println!(
                         "    install script: {}",
-                        yn(report.capabilities.has_install_scripts || has_install)
+                        yn(report.capabilities.has_install_scripts || entry.has_install_script)
                     );
                 }
                 Err(_) => {
                     println!("    (could not scan package)");
-                    println!("    install script: {}", yn(has_install));
+                    println!("    install script: {}", yn(entry.has_install_script));
                 }
             }
         } else {
             println!("    (package not found in store -- run `oath install`)");
-            println!("    install script: {}", yn(has_install));
+            println!("    install script: {}", yn(entry.has_install_script));
         }
         println!();
     }
     Ok(())
 }
 
-/// BFS from `start` upward through rdeps to find path to a root node.
-/// Returns the chain of package keys from direct parent up to (but not including) the root.
-fn find_dep_path(
-    start: &str,
-    rdeps: &HashMap<String, Vec<String>>,
-    _all_keys: &HashSet<&str>,
-) -> Vec<String> {
-    // BFS
-    let mut queue: std::collections::VecDeque<(String, Vec<String>)> =
-        std::collections::VecDeque::new();
-    queue.push_back((start.to_string(), vec![]));
-    let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(start.to_string());
+/// Name-, key-, and edge-aware view over a lockfile that works for both lock
+/// key formats: legacy `name@version` keys and Arborist-mode `node_modules/...`
+/// location keys, whose dependency maps point at other keys directly.
+struct LockView<'a> {
+    lockfile: &'a Lockfile,
+    names: HashMap<&'a str, String>,
+    /// key -> keys that depend on it
+    rdeps: HashMap<&'a str, Vec<&'a str>>,
+}
 
-    while let Some((current, path)) = queue.pop_front() {
-        if let Some(parents) = rdeps.get(&current) {
-            for parent in parents {
-                if visited.contains(parent) {
-                    continue;
+impl<'a> LockView<'a> {
+    fn new(lockfile: &'a Lockfile) -> Self {
+        let names: HashMap<&str, String> = lockfile
+            .packages
+            .iter()
+            .map(|(key, entry)| (key.as_str(), entry.package_name_for_key(key)))
+            .collect();
+        let mut rdeps: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (key, entry) in &lockfile.packages {
+            for (dep_name, dep_ref) in &entry.dependencies {
+                if let Some(target) = Self::resolve_ref(lockfile, dep_name, dep_ref) {
+                    rdeps.entry(target).or_default().push(key.as_str());
                 }
-                let mut new_path = vec![parent.clone()];
-                new_path.extend(path.iter().cloned());
-                // If parent has no rdeps it's a root
-                let parent_has_parents = rdeps.get(parent).map(|v| !v.is_empty()).unwrap_or(false);
-                if !parent_has_parents {
-                    return new_path;
-                }
-                visited.insert(parent.clone());
-                queue.push_back((parent.clone(), new_path));
             }
-        } else {
-            // current is a root, return path
-            return path;
+        }
+        for parents in rdeps.values_mut() {
+            parents.sort();
+            parents.dedup();
+        }
+        Self {
+            lockfile,
+            names,
+            rdeps,
         }
     }
-    vec![]
+
+    /// A dependency map value is either a lock key (Arborist mode) or a version
+    /// that combines with the dependency name into a legacy `name@version` key.
+    fn resolve_ref<'b>(lockfile: &'b Lockfile, dep_name: &str, dep_ref: &str) -> Option<&'b str> {
+        if let Some((key, _)) = lockfile.packages.get_key_value(dep_ref) {
+            return Some(key.as_str());
+        }
+        let legacy = format!("{dep_name}@{dep_ref}");
+        lockfile
+            .packages
+            .get_key_value(&legacy)
+            .map(|(key, _)| key.as_str())
+    }
+
+    fn name_of(&self, key: &str) -> String {
+        self.names
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    fn display(&self, key: &str) -> String {
+        let entry = &self.lockfile.packages[key];
+        format!("{}@{}", self.name_of(key), entry.version)
+    }
+
+    /// Every key whose package name or install alias equals `package`.
+    fn keys_for_name(&self, package: &str) -> Vec<&'a str> {
+        self.lockfile
+            .packages
+            .iter()
+            .filter(|(key, entry)| {
+                self.names.get(key.as_str()).map(String::as_str) == Some(package)
+                    || entry.alias.as_deref() == Some(package)
+            })
+            .map(|(key, _)| key.as_str())
+            .collect()
+    }
+
+    /// Resolved child keys of `key`, in sorted order.
+    fn children(&self, key: &str) -> Vec<&'a str> {
+        let Some(entry) = self.lockfile.packages.get(key) else {
+            return Vec::new();
+        };
+        let mut children: Vec<&str> = entry
+            .dependencies
+            .iter()
+            .filter_map(|(dep_name, dep_ref)| Self::resolve_ref(self.lockfile, dep_name, dep_ref))
+            .collect();
+        children.sort();
+        children.dedup();
+        children
+    }
+
+    /// Shortest chain of keys from the nearest root-level package down to the
+    /// direct parent of `start`, found by breadth-first search over reverse
+    /// edges. A root-level package is one with no dependents.
+    fn path_to_root(&self, start: &str) -> Vec<String> {
+        let mut queue: std::collections::VecDeque<(&str, Vec<&str>)> =
+            std::collections::VecDeque::new();
+        let mut visited: HashSet<&str> = HashSet::new();
+        visited.insert(start);
+        queue.push_back((start, Vec::new()));
+        while let Some((current, path)) = queue.pop_front() {
+            let Some(parents) = self.rdeps.get(current) else {
+                return path.iter().map(|k| k.to_string()).collect();
+            };
+            for parent in parents {
+                if !visited.insert(parent) {
+                    continue;
+                }
+                let mut next = vec![*parent];
+                next.extend(path.iter().copied());
+                let parent_is_root = self.rdeps.get(parent).is_none_or(|v| v.is_empty());
+                if parent_is_root {
+                    return next.iter().map(|k| k.to_string()).collect();
+                }
+                queue.push_back((parent, next));
+            }
+        }
+        Vec::new()
+    }
 }
 
 // ---- LICENSES ---------------------------------------------------------------
@@ -2157,119 +2241,67 @@ fn cmd_graph(max_depth: usize) -> Result<()> {
         println!("oath graph: no oath-lock.json found (run `oath install` first)");
         return Ok(());
     }
-    let content = std::fs::read_to_string(&lock_path)?;
-    let lock: serde_json::Value = serde_json::from_str(&content)?;
+    let lockfile = Lockfile::read(&lock_path)?;
+    if lockfile.packages.is_empty() {
+        println!("oath graph: oath-lock.json has no packages");
+        return Ok(());
+    }
+    let view = LockView::new(&lockfile);
 
-    let packages = match lock.get("packages").and_then(|p| p.as_object()) {
-        Some(p) => p,
-        None => {
-            println!("oath graph: oath-lock.json has no packages");
-            return Ok(());
-        }
-    };
-
-    // Determine root keys: packages listed under "roots" or inferred from package.json
-    let roots: Vec<String> = if let Some(r) = lock.get("roots").and_then(|r| r.as_array()) {
-        r.iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect()
+    let (root_label, mut root_children): (String, Vec<&str>) = if PathBuf::from("package.json")
+        .exists()
+    {
+        let pkg = read_package_json().unwrap_or(serde_json::json!({}));
+        let name = pkg["name"].as_str().unwrap_or("project").to_string();
+        let version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
+        let mut direct: Vec<String> = extract_deps(&pkg, "dependencies").keys().cloned().collect();
+        direct.extend(extract_deps(&pkg, "devDependencies").keys().cloned());
+        direct.sort();
+        direct.dedup();
+        // A direct dependency lives at a root-level location in Arborist-mode
+        // locks; in legacy locks it is whichever version the lock recorded.
+        let children = direct
+            .iter()
+            .filter_map(|dep| {
+                let candidates = view.keys_for_name(dep);
+                candidates
+                    .iter()
+                    .find(|key| lockfile.roots.contains(&key.to_string()))
+                    .or_else(|| candidates.first())
+                    .copied()
+            })
+            .collect();
+        (format!("{name}@{version}"), children)
+    } else if !lockfile.roots.is_empty() {
+        (
+            format!("{}@{}", lockfile.name, lockfile.version),
+            lockfile.roots.iter().map(String::as_str).collect(),
+        )
     } else {
-        // Fall back: use direct deps from package.json if available
-        if PathBuf::from("package.json").exists() {
-            let pkg = read_package_json().unwrap_or(serde_json::json!({}));
-            let name = pkg["name"].as_str().unwrap_or("project").to_string();
-            let version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
-            // Print a synthetic root
-            println!("  {name}@{version}");
-
-            let mut direct_deps: Vec<String> = {
-                let mut d: Vec<String> =
-                    extract_deps(&pkg, "dependencies").keys().cloned().collect();
-                d.extend(extract_deps(&pkg, "devDependencies").keys().cloned());
-                d.sort();
-                d
-            };
-
-            // Resolve each direct dep to a versioned key in the lockfile
-            let root_children: Vec<String> = direct_deps
-                .drain(..)
-                .filter_map(|dep_name| {
-                    // Find matching key in packages
-                    packages
-                        .keys()
-                        .find(|k| {
-                            let k = k.as_str();
-                            k == dep_name || k.starts_with(&format!("{dep_name}@"))
-                        })
-                        .cloned()
-                })
-                .collect();
-
-            print_graph_children(
-                &root_children,
-                packages,
-                1,
-                max_depth,
-                &mut HashSet::new(),
-                "",
-            );
-            println!();
-            return Ok(());
-        } else {
-            // No package.json; pick nodes with no incoming edges as roots
-            let mut has_parent: HashSet<&str> = HashSet::new();
-            for node in packages.values() {
-                if let Some(deps) = node.get("dependencies").and_then(|d| d.as_object()) {
-                    for (dep_name, dep_ver) in deps.iter() {
-                        let dep_ver_str = dep_ver.as_str().unwrap_or("");
-                        let dep_key = format!("{dep_name}@{dep_ver_str}");
-                        if packages.contains_key(&dep_key) {
-                            has_parent.insert(
-                                packages
-                                    .get_key_value(&dep_key)
-                                    .map(|(k, _)| k.as_str())
-                                    .unwrap_or(""),
-                            );
-                        }
-                    }
-                }
-            }
-            packages
-                .keys()
-                .filter(|k| !has_parent.contains(k.as_str()))
-                .cloned()
-                .collect()
-        }
+        let roots: Vec<&str> = lockfile
+            .packages
+            .keys()
+            .map(String::as_str)
+            .filter(|key| view.rdeps.get(key).is_none_or(|v| v.is_empty()))
+            .collect();
+        (format!("{}@{}", lockfile.name, lockfile.version), roots)
     };
+    root_children.sort();
+    root_children.dedup();
 
-    if roots.is_empty() {
+    if root_children.is_empty() {
         println!("  (no root packages found)");
         return Ok(());
     }
-
-    for root_key in &roots {
-        println!("  {root_key}");
-        if let Some(root_node) = packages.get(root_key)
-            && let Some(deps) = root_node.get("dependencies").and_then(|d| d.as_object())
-        {
-            let mut dep_keys: Vec<String> = deps
-                .iter()
-                .map(|(dep_name, dep_ver)| {
-                    let dep_ver_str = dep_ver.as_str().unwrap_or("");
-                    format!("{dep_name}@{dep_ver_str}")
-                })
-                .collect();
-            dep_keys.sort();
-            print_graph_children(&dep_keys, packages, 1, max_depth, &mut HashSet::new(), "");
-        }
-    }
+    println!("  {root_label}");
+    print_graph_children(&root_children, &view, 1, max_depth, &mut HashSet::new(), "");
     println!();
     Ok(())
 }
 
 fn print_graph_children(
-    children: &[String],
-    packages: &serde_json::Map<String, serde_json::Value>,
+    children: &[&str],
+    view: &LockView<'_>,
     depth: usize,
     max_depth: usize,
     visited: &mut HashSet<String>,
@@ -2278,58 +2310,37 @@ fn print_graph_children(
     let count = children.len();
     for (i, child_key) in children.iter().enumerate() {
         let is_last = i == count - 1;
-        let connector = "+--";
         let child_prefix = if is_last {
             format!("{prefix}    ")
         } else {
             format!("{prefix}|   ")
         };
+        println!("  {prefix}+-- {}", view.display(child_key));
 
-        println!("  {prefix}{connector} {child_key}");
-
+        let grandchildren = view.children(child_key);
         if depth >= max_depth {
-            // Check if there are deeper deps but we're truncating
-            if let Some(node) = packages.get(child_key)
-                && let Some(deps) = node.get("dependencies").and_then(|d| d.as_object())
-                && !deps.is_empty()
-            {
+            if !grandchildren.is_empty() {
                 println!(
                     "  {child_prefix}... ({} more deps, use --depth to show)",
-                    deps.len()
+                    grandchildren.len()
                 );
             }
             continue;
         }
-
-        if visited.contains(child_key) {
+        if visited.contains(*child_key) {
             println!("  {child_prefix}(circular)");
             continue;
         }
-
-        visited.insert(child_key.clone());
-
-        if let Some(node) = packages.get(child_key)
-            && let Some(deps) = node.get("dependencies").and_then(|d| d.as_object())
-        {
-            let mut dep_keys: Vec<String> = deps
-                .iter()
-                .map(|(dep_name, dep_ver)| {
-                    let dep_ver_str = dep_ver.as_str().unwrap_or("");
-                    format!("{dep_name}@{dep_ver_str}")
-                })
-                .collect();
-            dep_keys.sort();
-            print_graph_children(
-                &dep_keys,
-                packages,
-                depth + 1,
-                max_depth,
-                visited,
-                &child_prefix,
-            );
-        }
-
-        visited.remove(child_key);
+        visited.insert(child_key.to_string());
+        print_graph_children(
+            &grandchildren,
+            view,
+            depth + 1,
+            max_depth,
+            visited,
+            &child_prefix,
+        );
+        visited.remove(*child_key);
     }
 }
 
@@ -2493,10 +2504,520 @@ async fn hydrate_missing_registry_metadata(plan: &mut PlacementPlan) -> Result<(
     Ok(())
 }
 
+/// Refuse the install outright when the resolved tree contains a package the
+/// policy bans. Nothing is downloaded for a banned package.
+fn enforce_banned_packages(policy: &OathPolicy, graph: &DepGraph) -> Result<()> {
+    let mut banned: Vec<String> = graph
+        .nodes
+        .values()
+        .filter(|node| policy.is_package_banned(&node.name))
+        .map(|node| format!("{}@{}", node.name, node.version))
+        .collect();
+    if banned.is_empty() {
+        return Ok(());
+    }
+    banned.sort();
+    banned.dedup();
+    anyhow::bail!(
+        "install blocked by policy: banned package(s) {} (see banned_packages in oath-policy.toml)",
+        banned.join(", ")
+    );
+}
+
+/// Read the SPDX license field of a package's verified store copy.
+fn store_package_license(store: &ContentStore, node: &DepNode) -> Option<String> {
+    let dir = store.package_dir_for(
+        &node.name,
+        &node.version,
+        Some(&node.resolved),
+        node.integrity.as_deref(),
+    );
+    let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    match value.get("license") {
+        Some(serde_json::Value::String(license)) => Some(license.clone()),
+        Some(serde_json::Value::Object(object)) => object
+            .get("type")
+            .and_then(|t| t.as_str())
+            .map(String::from),
+        _ => None,
+    }
+}
+
+/// Refuse to link any new package whose license the policy bans.
+fn enforce_banned_licenses(
+    policy: &OathPolicy,
+    new_nodes: &[DepNode],
+    store: &ContentStore,
+) -> Result<()> {
+    if policy.banned_licenses.is_empty() {
+        return Ok(());
+    }
+    let mut offenders: Vec<String> = new_nodes
+        .iter()
+        .filter_map(|node| {
+            let license = store_package_license(store, node)?;
+            policy
+                .is_license_banned(&license)
+                .then(|| format!("{}@{} ({license})", node.name, node.version))
+        })
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    offenders.sort();
+    anyhow::bail!(
+        "install blocked by policy: banned license(s) on {} (see banned_licenses in oath-policy.toml)",
+        offenders.join(", ")
+    );
+}
+
+/// Scan the verified store copies of the given nodes in parallel.
+fn scan_nodes(
+    nodes: &[DepNode],
+    store: &ContentStore,
+) -> Vec<(String, String, oath_analyze::AnalysisReport)> {
+    let mut scanned: Vec<_> = nodes
+        .par_iter()
+        .filter_map(|node| {
+            let pkg_dir = store.package_dir_for(
+                &node.name,
+                &node.version,
+                Some(&node.resolved),
+                node.integrity.as_deref(),
+            );
+            if !pkg_dir.exists() {
+                return None;
+            }
+            PackageScanner::scan(&node.name, &node.version, &pkg_dir)
+                .ok()
+                .map(|report| (node.name.clone(), node.version.clone(), report))
+        })
+        .collect();
+    scanned.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    scanned.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    scanned
+}
+
+/// Print the tiered behavioral verdicts: capabilities are neutral; only
+/// dangerous combinations escalate. Critical = Block-tier, High = Warn-tier.
+fn report_scan_results(reports: &[(String, String, oath_analyze::AnalysisReport)]) {
+    let mut critical = 0usize;
+    let mut high = 0usize;
+    for (name, version, report) in reports {
+        match report.overall_risk {
+            RiskLevel::Critical => {
+                critical += 1;
+                println!();
+                println!("  \u{26d4} flagged  {name}@{version}");
+                for r in &report.verdict_reasons {
+                    println!("       - {r}");
+                }
+                let caps = fmt_capabilities(&report.capabilities);
+                if !caps.is_empty() {
+                    println!("       capabilities: {caps}");
+                }
+            }
+            RiskLevel::High => {
+                high += 1;
+                println!(
+                    "  \u{26a0}  warn     {name}@{version} -- {}",
+                    report
+                        .verdict_reasons
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("flagged behavior")
+                );
+            }
+            _ => {}
+        }
+    }
+    if critical > 0 {
+        println!();
+        println!(
+            "  {} package(s) flagged (review with `oath perms <pkg>` / `oath scan`)",
+            critical
+        );
+    } else if high > 0 {
+        println!(
+            "  {} warning(s) -- run `oath scan --verbose` for details",
+            high
+        );
+    } else {
+        println!("  all clear");
+    }
+}
+
+/// Order of the shared risk ladder, by display name, so the scanner's and the
+/// policy's independently defined `RiskLevel` enums can be compared.
+fn risk_rank(level: &str) -> u8 {
+    match level {
+        "clean" => 0,
+        "info" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        _ => 5,
+    }
+}
+
+/// Abort before linking when a new package exceeds `max_risk_level`.
+fn enforce_max_risk(
+    policy: &OathPolicy,
+    reports: &[(String, String, oath_analyze::AnalysisReport)],
+) -> Result<()> {
+    let ceiling = risk_rank(&policy.max_risk().to_string());
+    let mut over: Vec<String> = reports
+        .iter()
+        .filter(|(_, _, report)| risk_rank(&report.overall_risk.to_string()) > ceiling)
+        .map(|(name, version, report)| format!("{name}@{version} ({})", report.overall_risk))
+        .collect();
+    if over.is_empty() {
+        return Ok(());
+    }
+    over.sort();
+    anyhow::bail!(
+        "install blocked by policy: {} exceed max_risk_level = \"{}\"",
+        over.join(", "),
+        policy.max_risk_level
+    );
+}
+
+/// Packages listed under `require_approval` need an explicit yes before they
+/// are linked for the first time: `--yes`, or an interactive confirmation.
+fn require_policy_approvals(
+    policy: &OathPolicy,
+    new_nodes: &[DepNode],
+    yes_flag: bool,
+) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+    let mut pending: Vec<String> = new_nodes
+        .iter()
+        .filter(|node| {
+            policy
+                .require_approval
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(&node.name))
+        })
+        .map(|node| format!("{}@{}", node.name, node.version))
+        .collect();
+    if pending.is_empty() || yes_flag {
+        return Ok(());
+    }
+    pending.sort();
+    pending.dedup();
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "install blocked by policy: {} require approval (require_approval); rerun with --yes to approve",
+            pending.join(", ")
+        );
+    }
+    println!();
+    println!("  policy requires approval before installing:");
+    for name in &pending {
+        println!("    - {name}");
+    }
+    print!("  approve? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    anyhow::ensure!(
+        input.trim().eq_ignore_ascii_case("y"),
+        "install blocked: approval declined for {}",
+        pending.join(", ")
+    );
+    Ok(())
+}
+
+/// Directories outside the project that the project's own manifests point at
+/// with `file:` / path specifiers. npm symlinks those; Oath permits exactly
+/// these targets and no others declared by dependencies.
+fn external_link_targets(
+    project_root: &std::path::Path,
+    root_manifest: &serde_json::Value,
+    workspace: Option<&WorkspaceRoot>,
+) -> HashSet<PathBuf> {
+    fn collect(
+        base: &std::path::Path,
+        manifest_deps: impl Iterator<Item = (String, String)>,
+        out: &mut HashSet<PathBuf>,
+    ) {
+        for (_, spec) in manifest_deps {
+            let path = if let Some(rest) = spec.strip_prefix("file:") {
+                rest.to_string()
+            } else if spec.starts_with("./")
+                || spec.starts_with("../")
+                || spec.starts_with('/')
+                || spec.starts_with("~/")
+            {
+                spec.clone()
+            } else {
+                continue;
+            };
+            let expanded = if let Some(rest) = path.strip_prefix("~/") {
+                match oath_core::home_dir() {
+                    Some(home) => home.join(rest),
+                    None => continue,
+                }
+            } else {
+                base.join(path)
+            };
+            if let Ok(canonical) = std::fs::canonicalize(&expanded)
+                && canonical.is_dir()
+            {
+                out.insert(canonical);
+            }
+        }
+    }
+    let mut targets = HashSet::new();
+    let sections = [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ];
+    collect(
+        project_root,
+        sections
+            .iter()
+            .flat_map(|section| extract_deps(root_manifest, section)),
+        &mut targets,
+    );
+    if let Some(ws) = workspace {
+        for pkg in &ws.packages {
+            let m = &pkg.package_json;
+            collect(
+                &pkg.path,
+                m.dependencies
+                    .iter()
+                    .chain(m.dev_dependencies.iter())
+                    .chain(m.optional_dependencies.iter())
+                    .chain(m.peer_dependencies.iter())
+                    .map(|(k, v)| (k.clone(), v.clone())),
+                &mut targets,
+            );
+        }
+    }
+    targets
+}
+
+/// Remove optional dependencies whose fetch failed, plus any optional
+/// packages that only they depended on, from the plan and the graph.
+fn prune_failed_optional(
+    plan: Option<&mut PlacementPlan>,
+    graph: &mut DepGraph,
+    failed: &[FailedDownload],
+) {
+    let failed_identity: HashSet<(&str, &str, &str)> = failed
+        .iter()
+        .map(|f| (f.name.as_str(), f.version.as_str(), f.resolved.as_str()))
+        .collect();
+    let mut removed: HashSet<String> = graph
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            failed_identity.contains(&(
+                node.name.as_str(),
+                node.version.as_str(),
+                node.resolved.as_str(),
+            ))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    loop {
+        for key in &removed {
+            graph.nodes.remove(key);
+        }
+        for node in graph.nodes.values_mut() {
+            node.dependencies
+                .retain(|_, target| !removed.contains(target));
+            node.resolved_peers
+                .retain(|_, target| !removed.contains(target));
+        }
+        graph.roots.retain(|key| !removed.contains(key));
+        // Optional packages nobody depends on any more were only ever needed
+        // by something that is now gone.
+        let referenced: HashSet<&String> = graph
+            .nodes
+            .values()
+            .flat_map(|node| {
+                node.dependencies
+                    .values()
+                    .chain(node.resolved_peers.values())
+            })
+            .collect();
+        let orphaned: HashSet<String> = graph
+            .nodes
+            .iter()
+            .filter(|(key, node)| {
+                node.optional && !graph.roots.contains(key) && !referenced.contains(key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        if orphaned.is_empty() {
+            break;
+        }
+        removed = orphaned;
+    }
+    if let Some(plan) = plan {
+        plan.nodes
+            .retain(|node| graph.nodes.contains_key(&node.location) || node.link);
+    }
+}
+
+/// A dependency whose install scripts are due to run, and where.
+struct ScriptTarget {
+    name: String,
+    version: String,
+    dir: PathBuf,
+}
+
+/// Graph nodes absent from the previous lockfile (new to this project), merged
+/// with the nodes that were just downloaded, deduplicated by identity.
+fn nodes_new_to_project(
+    graph: &DepGraph,
+    previous_lock: Option<&Lockfile>,
+    downloaded: &[DepNode],
+) -> Vec<DepNode> {
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut out = Vec::new();
+    let mut push = |node: &DepNode| {
+        if seen.insert((
+            node.name.clone(),
+            node.version.clone(),
+            node.resolved.clone(),
+        )) {
+            out.push(node.clone());
+        }
+    };
+    let mut keys: Vec<&String> = graph.nodes.keys().collect();
+    keys.sort();
+    for key in keys {
+        let node = &graph.nodes[key];
+        let known = previous_lock.is_some_and(|lock| {
+            lock.packages.get(key).is_some_and(|entry| {
+                entry.version == node.version && entry.resolved == node.resolved
+            })
+        });
+        if !known {
+            push(node);
+        }
+    }
+    for node in downloaded {
+        push(node);
+    }
+    out
+}
+
+/// Dependencies with install scripts, in dependency order (dependencies before
+/// dependents), restricted to placements Arborist added or changed. Each runs
+/// in its real install location; the shared store is never a script cwd.
+fn install_script_targets(
+    plan: Option<&PlacementPlan>,
+    graph: &DepGraph,
+    project_root: &std::path::Path,
+) -> Vec<ScriptTarget> {
+    let Some(plan) = plan else {
+        // Legacy resolver canary: no placement information, so use the
+        // hoisted top-level location in deterministic key order.
+        let mut keys: Vec<&String> = graph.nodes.keys().collect();
+        keys.sort();
+        return keys
+            .into_iter()
+            .filter_map(|key| {
+                let node = &graph.nodes[key];
+                node.has_install_script.then(|| ScriptTarget {
+                    name: node.name.clone(),
+                    version: node.version.clone(),
+                    dir: project_root
+                        .join("node_modules")
+                        .join(node.alias.as_deref().unwrap_or(&node.name)),
+                })
+            })
+            .collect();
+    };
+
+    let by_location: HashMap<&str, &oath_resolve::placement::PlacementNode> = plan
+        .nodes
+        .iter()
+        .map(|node| (node.location.as_str(), node))
+        .collect();
+    let mut order: Vec<&str> = Vec::new();
+    let mut state: HashMap<&str, u8> = HashMap::new(); // 1 = visiting, 2 = done
+    fn visit<'a>(
+        location: &'a str,
+        by_location: &HashMap<&'a str, &'a oath_resolve::placement::PlacementNode>,
+        state: &mut HashMap<&'a str, u8>,
+        order: &mut Vec<&'a str>,
+    ) {
+        match state.get(location) {
+            Some(_) => return,
+            None => {
+                state.insert(location, 1);
+            }
+        }
+        if let Some(node) = by_location.get(location) {
+            let mut targets: Vec<&str> = node
+                .edges
+                .iter()
+                .filter_map(|edge| edge.target_location.as_deref())
+                .collect();
+            targets.sort();
+            for target in targets {
+                visit(target, by_location, state, order);
+            }
+        }
+        state.insert(location, 2);
+        order.push(location);
+    }
+    let mut locations: Vec<&str> = by_location.keys().copied().collect();
+    locations.sort();
+    for location in locations {
+        visit(location, &by_location, &mut state, &mut order);
+    }
+    order
+        .into_iter()
+        .filter_map(|location| {
+            let placement = by_location.get(location)?;
+            if !placement.has_install_script {
+                return None;
+            }
+            if placement.link {
+                // npm rebuilds links it manages directly (linked from the
+                // project root) on every install; links nested inside
+                // dependencies belong to those dependencies.
+                let root_linked = location
+                    .strip_prefix("node_modules/")
+                    .is_some_and(|rest| !rest.contains("/node_modules/"));
+                if !root_linked {
+                    return None;
+                }
+            } else if placement.reuse_existing {
+                return None;
+            }
+            Some(ScriptTarget {
+                name: placement.name.clone(),
+                version: placement.version.clone(),
+                dir: project_root.join(location),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Default)]
 struct DownloadSummary {
     downloaded: usize,
     bytes: u64,
+    /// Optional dependencies whose fetch failed. npm tolerates these and
+    /// prunes them from the tree; a failed non-optional fetch is still fatal.
+    failed_optional: Vec<FailedDownload>,
+}
+
+#[derive(Debug, Clone)]
+struct FailedDownload {
+    name: String,
+    version: String,
+    resolved: String,
 }
 
 struct DownloadedPackage {
@@ -2520,12 +3041,18 @@ async fn download_missing_nodes(
     }
 
     let limits = TarballLimits::from_env()?;
-    let mut set: JoinSet<Result<DownloadedPackage>> = JoinSet::new();
+    let mut set: JoinSet<(FailedDownload, bool, Result<DownloadedPackage>)> = JoinSet::new();
     for node in to_download {
         let client = Arc::clone(&client);
         let limits = limits.clone();
+        let identity = FailedDownload {
+            name: node.name.clone(),
+            version: node.version.clone(),
+            resolved: node.resolved.clone(),
+        };
+        let optional = node.optional;
         set.spawn(async move {
-            download_tarball_to_temp(
+            let result = download_tarball_to_temp(
                 client,
                 node.name,
                 node.version,
@@ -2533,12 +3060,25 @@ async fn download_missing_nodes(
                 node.integrity,
                 limits,
             )
-            .await
+            .await;
+            (identity, optional, result)
         });
     }
 
     while let Some(res) = set.join_next().await {
-        let downloaded = res??;
+        let (identity, optional, result) = res?;
+        let downloaded = match result {
+            Ok(downloaded) => downloaded,
+            Err(error) if optional => {
+                eprintln!(
+                    "  oath: skipping optional dependency {}@{}: {error:#}",
+                    identity.name, identity.version
+                );
+                summary.failed_optional.push(identity);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         summary.bytes += downloaded.bytes;
         let tmp = tempfile::tempdir()?;
         oath_fetch::tarball::extract_tarball_file_limited(
@@ -2583,9 +3123,7 @@ async fn download_tarball_to_temp(
         if !cache_file.exists() {
             let spec = parse_git_spec(&resolved)
                 .with_context(|| format!("invalid git dependency URL {resolved}"))?;
-            let http = reqwest::Client::builder()
-                .user_agent(concat!("oath/", env!("CARGO_PKG_VERSION")))
-                .build()?;
+            let http = oath_fetch::http::client_builder()?.build()?;
             let git = resolve_git_spec(&spec, &http)
                 .await
                 .with_context(|| format!("fetching git dependency {name}@{version}"))?;
@@ -3159,9 +3697,16 @@ fn run_node_binary(
     #[cfg(target_os = "linux")]
     if sandbox_mode == ExecSandboxMode::Native {
         let plan = sandbox_plan.context("native sandbox requires a sandbox plan")?;
+        // Use the Node on PATH (nvm, Volta, fnm, Homebrew, or the system one)
+        // and grant exactly that binary inside the namespace, read-only.
+        let node = active_node_executable()?;
+        let mut plan = plan.clone();
+        if !node.starts_with("/usr") && !node.starts_with("/bin") && !node.starts_with("/lib") {
+            plan.read_only_paths.push(node.clone());
+        }
         return oath_sandbox::linux::run(
-            plan,
-            std::path::Path::new("/usr/bin/node"),
+            &plan,
+            &node,
             &std::iter::once(bin_path.display().to_string())
                 .chain(args.iter().cloned())
                 .collect::<Vec<_>>(),
@@ -3181,15 +3726,7 @@ fn run_node_binary(
     #[cfg(target_os = "macos")]
     if sandbox_mode == ExecSandboxMode::Native {
         let plan = sandbox_plan.context("native sandbox requires a sandbox plan")?;
-        let node = std::process::Command::new("node")
-            .args(["-p", "process.execPath"])
-            .output()
-            .context("failed to resolve the active Node executable")?;
-        anyhow::ensure!(node.status.success(), "active Node executable probe failed");
-        let node = std::path::PathBuf::from(String::from_utf8(node.stdout)?.trim());
-        let node = std::fs::canonicalize(&node).with_context(|| {
-            format!("failed to canonicalize Node executable {}", node.display())
-        })?;
+        let node = active_node_executable()?;
         let mut plan = plan.clone();
         plan.read_only_paths.push(node.clone());
         return oath_sandbox::macos::run(
@@ -3222,6 +3759,19 @@ fn run_node_binary(
     })
 }
 
+/// Canonical path of the Node executable the user's PATH selects.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn active_node_executable() -> Result<PathBuf> {
+    let node = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .context("failed to resolve the active Node executable")?;
+    anyhow::ensure!(node.status.success(), "active Node executable probe failed");
+    let node = PathBuf::from(String::from_utf8(node.stdout)?.trim());
+    std::fs::canonicalize(&node)
+        .with_context(|| format!("failed to canonicalize Node executable {}", node.display()))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_exec(
     package: &str,
@@ -3237,32 +3787,36 @@ async fn cmd_exec(
     deny_network: bool,
     allow_degraded_sandbox: bool,
     remember: bool,
-) -> Result<()> {
+) -> Result<i32> {
     use oath_analyze::{
         FindingKind, PackageScanner, RiskLevel, ScoreContext, compute_safety_score_contextual,
     };
-    use std::io::Write;
 
     let start = std::time::Instant::now();
     anyhow::ensure!(
         matches!(schema_version, 2 | 3),
         "unsupported exec assessment schema {schema_version}; supported versions are 2 and 3"
     );
+    // JSON mode reserves stdout for exactly one assessment document; a program
+    // that then writes to the same stream would corrupt it. Agents assess with
+    // --dry-run --json, then execute with the plain command.
+    anyhow::ensure!(
+        !json || dry_run,
+        "oath exec --json is an assessment-only interface and requires --dry-run; run the package without --json afterwards"
+    );
     let (pkg_name, pkg_version) = parse_package_spec(package);
     let sandbox_decision = resolve_exec_sandbox(sandbox, sandbox_mode, allow_degraded_sandbox)?;
     let effective_deny_network = deny_network || sandbox_decision.agent_mode;
 
-    // Local node_modules/.bin fast path: already installed by the project (trusted).
-    let local_bin = PathBuf::from("node_modules/.bin").join(&pkg_name);
-    if local_bin.exists() && !dry_run && sandbox_decision.effective_mode == ExecSandboxMode::Off {
-        if !json {
-            println!("oath exec: running {} (local)", pkg_name);
-        }
-        let status = std::process::Command::new(&local_bin)
-            .args(args)
-            .status()
-            .with_context(|| format!("failed to execute {}", pkg_name))?;
-        std::process::exit(status.code().unwrap_or(1));
+    // Local node_modules/.bin path: a bin the project already installed. It
+    // still goes through assessment (scan, grade gate, prompt); only the
+    // download is skipped. A version spec that the local copy does not satisfy
+    // falls through to the registry, like npx.
+    if !dry_run
+        && sandbox_decision.effective_mode == ExecSandboxMode::Off
+        && let Some(local) = resolve_local_bin(&pkg_name, &pkg_version)?
+    {
+        return exec_local_bin(&local, args, yes, require_grade).await;
     }
 
     if !json {
@@ -3418,7 +3972,7 @@ async fn cmd_exec(
                     "oath exec: BLOCKED -- {pkg_name}@{version} is {days}d old (need >= {min_days}d)"
                 );
             }
-            std::process::exit(EXEC_EXIT_AGE);
+            return Ok(EXEC_EXIT_AGE);
         }
     }
 
@@ -3455,9 +4009,8 @@ async fn cmd_exec(
     let ctx = {
         let mut weekly = 0u64;
         let mut age = 0u32;
-        if let Ok(http) = reqwest::Client::builder()
-            .user_agent(concat!("oath/", env!("CARGO_PKG_VERSION")))
-            .build()
+        if let Ok(http) =
+            oath_fetch::http::client_builder().and_then(|b| b.build().map_err(Into::into))
             && let Ok(meta) = oath_fetch::fetch_package_metadata(&http, &pkg_name).await
         {
             weekly = meta.weekly_downloads.unwrap_or(0);
@@ -3654,11 +4207,10 @@ async fn cmd_exec(
         });
         println!("{}", serde_json::to_string_pretty(&verdict)?);
         if grade_blocked {
-            std::process::exit(EXEC_EXIT_GRADE);
+            return Ok(EXEC_EXIT_GRADE);
         }
-        if dry_run {
-            return Ok(());
-        }
+        // --json implies --dry-run (checked above).
+        return Ok(0);
     } else {
         // Human pre-run card.
         println!("\n  {}@{}", pkg_name, version);
@@ -3704,24 +4256,17 @@ async fn cmd_exec(
                 score.grade,
                 require_grade.unwrap_or("")
             );
-            std::process::exit(EXEC_EXIT_GRADE);
+            return Ok(EXEC_EXIT_GRADE);
         }
         if dry_run {
-            return Ok(());
+            return Ok(0);
         }
         let needs_prompt = !serious.is_empty()
             && !yes
             && !previously_approved
             && std::env::var("OATH_ALLOW_ALL").is_err();
-        if needs_prompt {
-            print!("\n  run anyway? [y/N] ");
-            std::io::stdout().flush()?;
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("  blocked.");
-                std::process::exit(EXEC_EXIT_USER);
-            }
+        if needs_prompt && !confirm_run_anyway()? {
+            return Ok(EXEC_EXIT_USER);
         }
     }
 
@@ -3738,14 +4283,17 @@ async fn cmd_exec(
         Some(rel) => pkg_dir.join(rel),
         None => {
             let candidates = ["cli.js", "bin/index.js", "index.js", "bin.js"];
-            candidates
+            match candidates
                 .iter()
                 .map(|c| pkg_dir.join(c))
                 .find(|p| p.exists())
-                .unwrap_or_else(|| {
+            {
+                Some(path) => path,
+                None => {
                     eprintln!("oath exec: could not find binary for {pkg_name}");
-                    std::process::exit(1);
-                })
+                    return Ok(1);
+                }
+            }
         }
     };
 
@@ -3762,7 +4310,137 @@ async fn cmd_exec(
         sandbox_plan.as_ref(),
     )
     .with_context(|| format!("failed to execute node {}", bin_path.display()))?;
-    std::process::exit(status.code().unwrap_or(1));
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Ask the user to confirm running a package with serious findings.
+fn confirm_run_anyway() -> Result<bool> {
+    use std::io::Write;
+    print!("\n  run anyway? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    if input.trim().eq_ignore_ascii_case("y") {
+        Ok(true)
+    } else {
+        println!("  blocked.");
+        Ok(false)
+    }
+}
+
+/// A bin the current project already installed under node_modules/.bin.
+struct LocalBin {
+    bin_path: PathBuf,
+    package_dir: PathBuf,
+    name: String,
+    version: String,
+}
+
+/// Locate `node_modules/.bin/<name>` and the package that provides it. Returns
+/// `None` when there is no such bin, or when a requested version does not
+/// match the installed one.
+fn resolve_local_bin(bin_name: &str, requested: &str) -> Result<Option<LocalBin>> {
+    let bin_path = PathBuf::from("node_modules/.bin").join(bin_name);
+    if bin_path.symlink_metadata().is_err() {
+        return Ok(None);
+    }
+    let resolved = std::fs::canonicalize(&bin_path)
+        .with_context(|| format!("resolve local bin {}", bin_path.display()))?;
+    let mut package_dir = resolved.parent();
+    let manifest = loop {
+        let Some(dir) = package_dir else {
+            return Ok(None);
+        };
+        let candidate = dir.join("package.json");
+        if candidate.is_file() {
+            break candidate;
+        }
+        package_dir = dir.parent();
+    };
+    let package_dir = package_dir
+        .expect("package dir found with manifest")
+        .to_path_buf();
+    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest)?)
+        .with_context(|| format!("parse {}", manifest.display()))?;
+    let name = value["name"].as_str().unwrap_or(bin_name).to_string();
+    let version = value["version"].as_str().unwrap_or("0.0.0").to_string();
+    let satisfied = requested == "latest"
+        || requested == version
+        || requested
+            .parse::<node_semver::Range>()
+            .ok()
+            .zip(version.parse::<node_semver::Version>().ok())
+            .is_some_and(|(range, installed)| range.satisfies(&installed));
+    if !satisfied {
+        return Ok(None);
+    }
+    Ok(Some(LocalBin {
+        bin_path,
+        package_dir,
+        name,
+        version,
+    }))
+}
+
+/// Assess and run a locally installed bin. The project chose this package, so
+/// no download happens, but the same scan, grade gate, and prompt apply.
+async fn exec_local_bin(
+    local: &LocalBin,
+    args: &[String],
+    yes: bool,
+    require_grade: Option<&str>,
+) -> Result<i32> {
+    use oath_analyze::{PackageScanner, RiskLevel, ScoreContext, compute_safety_score_contextual};
+
+    let report = PackageScanner::scan(&local.name, &local.version, &local.package_dir)?;
+    let serious = if matches!(report.overall_risk, RiskLevel::High | RiskLevel::Critical) {
+        report.verdict_reasons.clone()
+    } else {
+        Vec::new()
+    };
+    println!(
+        "oath exec: running {}@{} (local)",
+        local.name, local.version
+    );
+    if let Some(required) = require_grade {
+        // Grade needs popularity context; fetch it best-effort.
+        let mut ctx = ScoreContext {
+            is_dev: false,
+            weekly_downloads: 0,
+            age_days: 0,
+        };
+        if let Ok(http) =
+            oath_fetch::http::client_builder().and_then(|b| b.build().map_err(Into::into))
+            && let Ok(meta) = oath_fetch::fetch_package_metadata(&http, &local.name).await
+        {
+            ctx.weekly_downloads = meta.weekly_downloads.unwrap_or(0);
+            ctx.age_days = meta.last_publish_age_days.map(|d| d as u32).unwrap_or(0);
+        }
+        let score = compute_safety_score_contextual(&report, &local.package_dir, &ctx);
+        println!("  grade        {} ({}/100)", score.grade, score.score);
+        if grade_rank(score.grade) < grade_rank(required.chars().next().unwrap_or('A')) {
+            eprintln!(
+                "\n  BLOCKED -- grade {} is below required {}",
+                score.grade, required
+            );
+            return Ok(EXEC_EXIT_GRADE);
+        }
+    }
+    if !serious.is_empty() {
+        println!("\n  findings:");
+        for finding in serious.iter().take(5) {
+            println!("    {finding}");
+        }
+        let needs_prompt = !yes && std::env::var("OATH_ALLOW_ALL").is_err();
+        if needs_prompt && !confirm_run_anyway()? {
+            return Ok(EXEC_EXIT_USER);
+        }
+    }
+    let status = std::process::Command::new(&local.bin_path)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to execute {}", local.bin_path.display()))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 // ---- SCORE ------------------------------------------------------------------
@@ -3824,9 +4502,8 @@ async fn cmd_score(package: &str) -> Result<()> {
     let ctx = {
         let mut weekly = 0u64;
         let mut age = 0u32;
-        if let Ok(http) = reqwest::Client::builder()
-            .user_agent(concat!("oath/", env!("CARGO_PKG_VERSION")))
-            .build()
+        if let Ok(http) =
+            oath_fetch::http::client_builder().and_then(|b| b.build().map_err(Into::into))
             && let Ok(meta) = oath_fetch::fetch_package_metadata(&http, &pkg_name).await
         {
             weekly = meta.weekly_downloads.unwrap_or(0);
@@ -3924,9 +4601,7 @@ async fn cmd_info(package: &str) -> Result<()> {
 
     println!("oath info: fetching metadata for {}...", pkg_name);
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("oath/", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let client = oath_fetch::http::client_builder()?.build()?;
 
     let meta = fetch_package_metadata(&client, &pkg_name).await?;
 
@@ -4059,93 +4734,91 @@ async fn cmd_remove(packages: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let mut pkg: serde_json::Value = if PathBuf::from("package.json").exists() {
-        read_package_json()?
-    } else {
-        anyhow::bail!("no package.json found");
-    };
+    let manifest_path = PathBuf::from("package.json");
+    anyhow::ensure!(manifest_path.exists(), "no package.json found");
+    let mut manifest_doc = manifest::PackageJsonDocument::load(&manifest_path)?;
 
-    let mut removed_any = false;
+    let sections = [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ];
     let mut removed_names = Vec::new();
     for package in &packages {
         let (name, _) = parse_package_spec(package);
-
-        // Remove from dependencies and devDependencies
-        let mut removed = false;
-        for dep_key in &["dependencies", "devDependencies"] {
-            if let Some(deps) = pkg.get_mut(dep_key).and_then(|d| d.as_object_mut())
-                && deps.remove(&name).is_some()
-            {
-                removed = true;
-            }
-        }
-
-        if !removed {
+        let declared = sections.iter().any(|section| {
+            manifest_doc
+                .value
+                .get(section)
+                .and_then(|d| d.as_object())
+                .is_some_and(|deps| deps.contains_key(&name))
+        });
+        if !declared {
             println!("oath remove: '{}' not found in package.json", name);
             continue;
         }
-
         println!("removed {}", name);
         removed_names.push(name);
-        removed_any = true;
     }
-
-    if !removed_any {
+    if removed_names.is_empty() {
         return Ok(());
     }
 
-    // Rebuild lockfile from remaining deps
-    let deps = extract_deps(&pkg, "dependencies");
-    let dev_deps = extract_deps(&pkg, "devDependencies");
-    let project_name = pkg["name"].as_str().unwrap_or("project").to_string();
-    let project_version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
-
-    if deps.is_empty() && dev_deps.is_empty() {
-        let nm_path = PathBuf::from("node_modules");
-        if nm_path.exists() || nm_path.symlink_metadata().is_ok() {
-            if nm_path.is_symlink() || nm_path.is_file() {
-                std::fs::remove_file(&nm_path).context("failed to clean node_modules")?;
-            } else {
-                std::fs::remove_dir_all(&nm_path).context("failed to clean node_modules")?;
+    // Arborist applies the removal to the manifest and prunes the tree the way
+    // npm does, including when the last dependency goes: node_modules stays,
+    // only the packages leave.
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let mut placement_plan =
+        ArboristPlanner::plan_with(&cwd, &PlacementRequest::remove(removed_names))?;
+    hydrate_missing_registry_metadata(&mut placement_plan).await?;
+    if let Some(root_manifest) = &placement_plan.root_manifest {
+        root_manifest.apply_to(&mut manifest_doc.value);
+    } else {
+        for section in sections {
+            if let Some(deps) = manifest_doc
+                .value
+                .get_mut(section)
+                .and_then(|d| d.as_object_mut())
+            {
+                for package in &packages {
+                    deps.remove(&parse_package_spec(package).0);
+                }
             }
         }
-        std::fs::write("package.json", serde_json::to_string_pretty(&pkg)?)?;
-        let empty_graph = oath_resolve::graph::DepGraph::new();
-        let lockfile = Lockfile::from_graph_with_manifest(
-            &empty_graph,
-            &project_name,
-            &project_version,
-            &deps,
-            &dev_deps,
-        );
-        lockfile.write(&PathBuf::from("oath-lock.json"))?;
-        let plan_path = PathBuf::from(".oath").join("placement-plan.json");
-        if plan_path.exists() {
-            std::fs::remove_file(plan_path)?;
-        }
-    } else {
-        let cwd = std::env::current_dir()?.canonicalize()?;
-        let mut placement_plan =
-            ArboristPlanner::plan_with(&cwd, &PlacementRequest::remove(removed_names))?;
-        hydrate_missing_registry_metadata(&mut placement_plan).await?;
-        let graph = placement_plan.to_dep_graph()?;
-        let store = Arc::new(ContentStore::default_store()?);
-        let client = Arc::new(RegistryClient::default_client()?);
-        let (to_download, _) = missing_store_nodes(&graph, &store);
-        download_missing_nodes(to_download, Arc::clone(&store), Arc::clone(&client)).await?;
-        let linker = Linker::new((*store).clone());
-        linker.link_placement_plan(&placement_plan, &cwd)?;
-        placement_plan.write(&cwd.join(".oath").join("placement-plan.json"))?;
-        std::fs::write("package.json", serde_json::to_string_pretty(&pkg)?)?;
-        let lockfile = Lockfile::from_graph_with_manifest(
-            &graph,
-            &project_name,
-            &project_version,
-            &deps,
-            &dev_deps,
-        );
-        lockfile.write(&PathBuf::from("oath-lock.json"))?;
     }
+    let graph = placement_plan.to_dep_graph()?;
+    let deps = extract_deps(&manifest_doc.value, "dependencies");
+    let dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
+    let project_name = manifest_doc.value["name"]
+        .as_str()
+        .unwrap_or("project")
+        .to_string();
+    let project_version = manifest_doc.value["version"]
+        .as_str()
+        .unwrap_or("0.0.0")
+        .to_string();
+
+    let store = Arc::new(ContentStore::default_store()?);
+    let client = Arc::new(RegistryClient::default_client()?);
+    let (to_download, _) = missing_store_nodes(&graph, &store);
+    download_missing_nodes(to_download, Arc::clone(&store), Arc::clone(&client)).await?;
+    let linker = Linker::new((*store).clone()).with_external_link_targets(external_link_targets(
+        &cwd,
+        &manifest_doc.value,
+        None,
+    ));
+    linker.link_placement_plan(&placement_plan, &cwd)?;
+    placement_plan.write(&cwd.join(".oath").join("placement-plan.json"))?;
+    manifest_doc.save()?;
+    let lockfile = Lockfile::from_graph_with_manifest(
+        &graph,
+        &project_name,
+        &project_version,
+        &deps,
+        &dev_deps,
+    );
+    lockfile.write(&PathBuf::from("oath-lock.json"))?;
 
     Ok(())
 }
@@ -4749,9 +5422,7 @@ async fn cmd_publish(
     let tarball_len = tarball_bytes.len();
 
     // 5. Check if version already published
-    let http_client = reqwest::Client::builder()
-        .user_agent(concat!("oath/", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let http_client = oath_fetch::http::client_builder()?.build()?;
 
     let registry_url = "https://registry.npmjs.org";
     let pkg_url = format!("{}/{}", registry_url, name);

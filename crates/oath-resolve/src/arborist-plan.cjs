@@ -1,7 +1,8 @@
 'use strict'
 const { execFileSync } = require('node:child_process')
-const { join } = require('node:path')
+const { join, relative } = require('node:path')
 const { existsSync, readFileSync } = require('node:fs')
+const { createRequire } = require('node:module')
 
 function loadNpmModule (name, override) {
   if (override && process.env[override]) return require(process.env[override])
@@ -31,10 +32,19 @@ async function main () {
     const normalized = value.trim().replace(/^(['"])(.*)\1$/, '$2').toLowerCase()
     return normalized === 'true'
   }
+  const stringOption = (name, fallback) => {
+    const value = npmrc[name]
+    if (value === undefined) return fallback
+    return value.trim().replace(/^(['"])(.*)\1$/, '$2')
+  }
+  // npm's save-prefix / save-exact decide how added registry packages are
+  // written back to package.json.
+  const savePrefix = boolOption('save-exact') ? '' : stringOption('save-prefix', '^')
   const arborist = new Arborist({
     path: project,
     audit: false,
     ignoreScripts: true,
+    savePrefix,
     legacyPeerDeps: boolOption('legacy-peer-deps'),
     strictPeerDeps: boolOption('strict-peer-deps'),
     // npm 11 defaults install-links to false: local directory dependencies
@@ -66,19 +76,23 @@ async function main () {
     // inDepBundle predicate captures exactly that distinction; inBundle also
     // includes dependencies bundled only by the project root.
     .filter(node => !node.inDepBundle && node.location && node.location.replaceAll('\\', '/').startsWith('node_modules/') && node.package && node.package.name && (node.isLink || node.package.version))
-    .map(node => ({
+    .map(node => {
+      // A link node's own package record can be empty when the tree was
+      // loaded from disk; its lifecycle scripts live in the link target.
+      const manifest = (node.isLink && node.target && node.target.package) ? node.target.package : node.package
+      return ({
       location: node.location.replaceAll('\\', '/'),
       install_name: node.name,
       name: node.package.name,
-      version: node.package.version || '0.0.0',
+      version: node.package.version || manifest.version || '0.0.0',
       resolved: node.resolved || null,
       integrity: node.integrity ? String(node.integrity) : null,
       dev: Boolean(node.dev),
       optional: Boolean(node.optional),
-      has_install_script: Boolean(node.package.scripts && (
-        node.package.scripts.preinstall ||
-        node.package.scripts.install ||
-        node.package.scripts.postinstall
+      has_install_script: Boolean(manifest.scripts && (
+        manifest.scripts.preinstall ||
+        manifest.scripts.install ||
+        manifest.scripts.postinstall
       )),
       reuse_existing: unchangedLocations.has(node.location.replaceAll('\\', '/')),
       link: Boolean(node.isLink),
@@ -90,17 +104,110 @@ async function main () {
         target_location: edge.to ? edge.to.location.replaceAll('\\', '/') : null,
         valid: Boolean(edge.valid)
       })).sort((a, b) => a.name.localeCompare(b.name))
-    }))
+      })
+    })
     .sort((a, b) => a.location.localeCompare(b.location))
   const invalid_edges = nodes.flatMap(node => node.edges.filter(edge => !edge.valid).map(edge => ({ location: node.location, ...edge })))
+  const wantsManifest = (request.add && request.add.length) || (request.rm && request.rm.length)
+  const root_manifest = wantsManifest ? savedRootManifest(arborist, tree, request, savePrefix) : null
   process.stdout.write(JSON.stringify({
     schema_version: 2,
     planner: { name: '@npmcli/arborist', npm: process.env.OATH_NPM_REFERENCE_VERSION || execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim() },
     project,
     nodes,
     removed_locations,
-    invalid_edges
+    invalid_edges,
+    root_manifest
   }))
+}
+
+// Reproduce the package.json dependency fields npm would write after an add or
+// remove request. Arborist already applied the user's add/rm to the in-memory
+// root manifest while building the ideal tree; a dry run skips `saveIdealTree`,
+// so the spec rewriting (save-prefix ranges, npm: aliases, hosted git
+// shortcuts, relative file: paths) and @npmcli/package-json's dependency
+// ordering are replayed here from the same sources.
+function savedRootManifest (arborist, tree, request, savePrefix) {
+  const arboristRequire = createRequire(join(require.resolve('@npmcli/arborist/package.json', { paths: [process.env.OATH_ARBORIST_PATH || process.cwd()] })))
+  const npa = arboristRequire('npm-package-arg')
+  const { subset, intersects } = arboristRequire('semver')
+  const updateDependencies = arboristRequire('@npmcli/package-json/lib/update-dependencies.js')
+  const { saveTypeMap, hasSubKey } = arboristRequire('@npmcli/arborist/lib/add-rm-pkg-deps.js')
+  const relpath = (from, to) => relative(from, to).replace(/\\/g, '/')
+  // reify() hands back the former ideal tree and clears arborist.idealTree,
+  // so the returned tree is the root whose package Arborist edited.
+  const root = tree
+  const resolvedAdd = arborist[Symbol.for('resolvedAdd')] || []
+  for (const spec of resolvedAdd) {
+    const addTree = spec.tree
+    if (!addTree || addTree !== root) continue
+    const name = spec.name
+    const edge = addTree.edgesOut.get(name)
+    if (!edge) continue
+    const pkg = addTree.package
+    const req = npa.resolve(name, edge.spec, addTree.realpath)
+    const { rawSpec, subSpec } = req
+    const rangeSpec = subSpec ? subSpec.rawSpec : rawSpec
+    const child = edge.to
+    if (!child) continue
+    let newSpec
+    const isLocalDep = req.type === 'directory' || req.type === 'file'
+    if (req.registry) {
+      const version = child.version
+      const prefixRange = version ? savePrefix + version : '*'
+      const isRange = (subSpec || req).type === 'range'
+      let range = rangeSpec
+      if (!isRange || rangeSpec === '*' || subset(prefixRange, rangeSpec, { loose: true })) {
+        range = prefixRange
+      }
+      const pname = child.packageName
+      newSpec = name !== pname ? `npm:${pname}@${range}` : range
+    } else if (req.hosted) {
+      const h = req.hosted
+      const opt = { noCommittish: false }
+      newSpec = (h.https && h.auth) ? `git+${h.https(opt)}` : h.shortcut(opt)
+    } else if (isLocalDep) {
+      if (edge.type === 'workspace') {
+        const { version } = edge.to.target
+        newSpec = version ? savePrefix + version : '*'
+      } else {
+        const p = req.fetchSpec.replace(/^file:/, '')
+        newSpec = `file:${relpath(addTree.realpath, p)}`
+      }
+    } else {
+      newSpec = req.saveSpec
+    }
+    if (request.save_type) {
+      const depType = saveTypeMap.get(request.save_type)
+      pkg[depType] = pkg[depType] || {}
+      pkg[depType][name] = newSpec
+      if (request.save_type === 'prod' && pkg.optionalDependencies) {
+        delete pkg.optionalDependencies[name]
+      }
+    } else {
+      if (hasSubKey(pkg, 'dependencies', name)) pkg.dependencies[name] = newSpec
+      if (hasSubKey(pkg, 'devDependencies', name)) {
+        pkg.devDependencies[name] = newSpec
+        if (hasSubKey(pkg, 'peerDependencies', name) && (isLocalDep || !intersects(newSpec, pkg.peerDependencies[name]))) {
+          pkg.peerDependencies[name] = newSpec
+        }
+        if (hasSubKey(pkg, 'optionalDependencies', name) && (isLocalDep || !intersects(newSpec, pkg.optionalDependencies[name]))) {
+          pkg.optionalDependencies[name] = newSpec
+        }
+      } else {
+        if (hasSubKey(pkg, 'peerDependencies', name)) pkg.peerDependencies[name] = newSpec
+        if (hasSubKey(pkg, 'optionalDependencies', name)) pkg.optionalDependencies[name] = newSpec
+      }
+    }
+  }
+  const pkg = root.package
+  const depTypes = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']
+  const content = {}
+  for (const type of depTypes) if (pkg[type]) content[type] = { ...pkg[type] }
+  const updated = updateDependencies({ content, originalContent: pkg })
+  const manifest = {}
+  for (const type of depTypes) manifest[type] = updated[type] && Object.keys(updated[type]).length ? updated[type] : null
+  return manifest
 }
 
 main().catch(error => { console.error(error.stack || error.message); process.exitCode = 1 })

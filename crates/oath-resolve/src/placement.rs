@@ -25,6 +25,74 @@ pub struct PlacementPlan {
     #[serde(default)]
     pub removed_locations: Vec<String>,
     pub invalid_edges: Vec<PlacementEdge>,
+    /// The dependency fields npm would write to the root package.json after an
+    /// add or remove request. Absent for plain install, ci, and update plans,
+    /// which never rewrite package.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_manifest: Option<RootManifest>,
+}
+
+/// Root package.json dependency sections as npm's `saveIdealTree` would save
+/// them: alphabetically ordered, with empty sections removed (`None`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RootManifest {
+    #[serde(default)]
+    pub dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "devDependencies")]
+    pub dev_dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "optionalDependencies")]
+    pub optional_dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "peerDependencies")]
+    pub peer_dependencies: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl RootManifest {
+    /// Apply the saved dependency sections to a parsed package.json, replacing
+    /// each section npm would have written and deleting sections npm would
+    /// have pruned. Every other key keeps its position and value.
+    pub fn apply_to(&self, manifest: &mut serde_json::Value) {
+        let Some(object) = manifest.as_object_mut() else {
+            return;
+        };
+        for (key, section) in [
+            ("dependencies", &self.dependencies),
+            ("devDependencies", &self.dev_dependencies),
+            ("optionalDependencies", &self.optional_dependencies),
+            ("peerDependencies", &self.peer_dependencies),
+        ] {
+            match section {
+                Some(map) => {
+                    object.insert(key.to_string(), serde_json::Value::Object(map.clone()));
+                }
+                None => {
+                    object.remove(key);
+                }
+            }
+        }
+    }
+
+    /// The root `dependencies` and `devDependencies` as plain name/spec maps,
+    /// used for the lockfile's manifest snapshot.
+    pub fn snapshot(
+        &self,
+    ) -> (
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    ) {
+        let to_map = |section: &Option<serde_json::Map<String, serde_json::Value>>| {
+            section
+                .as_ref()
+                .map(|map| {
+                    map.iter()
+                        .map(|(name, spec)| {
+                            (name.clone(), spec.as_str().unwrap_or("*").to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        (to_map(&self.dependencies), to_map(&self.dev_dependencies))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,6 +540,7 @@ mod tests {
             }],
             removed_locations: vec![],
             invalid_edges: vec![],
+            root_manifest: None,
         };
         assert!(validate_locations(&plan).is_err());
     }

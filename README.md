@@ -366,8 +366,12 @@ fixture through [GitHub Issues](https://github.com/Generalized-Labs/oath/issues)
 
 ## Requirements
 
-- Node.js for running installed JavaScript packages; the Oath binary itself
-  does not require Node for its baseline commands.
+- Node.js 22.14 or newer. Oath runs the pinned npm Arborist planner under
+  `node` for every install, add, update, remove, and exec, and runs package
+  code with it. Only inspection commands (`scan`, `perms`, `why`, `graph`,
+  `verify`, `licenses`, `log`, `sandbox-info`) work without Node.
+- npm 11 on `PATH` for `oath publish`, `oath transfer create`, and
+  `oath stage`, which use npm's packlist and staging client.
 - Rust 1.94 or newer when building from source.
 - Linux kernel 6.12+ and bubblewrap for strict native Linux containment.
 - Windows MSVC toolchain when building the current source on Windows.

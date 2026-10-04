@@ -144,6 +144,28 @@ try {
     oathResult = run(oath, oathArgs, oathDir, home, offline ? { npm_config_offline: "true" } : {});
   }
   const oathTree = oathResult.status === 0 ? await installedTree(join(oathDir, "node_modules")) : [];
+  // Neither installer may rewrite package.json on a plain install or ci: the
+  // fixture's bytes must survive both runs unchanged.
+  const fixtureManifest = await readFile(join(fixture, "package.json"), "utf8");
+  const manifestStable = {
+    npm: npmResult.status !== 0 || (await readFile(join(npmDir, "package.json"), "utf8")) === fixtureManifest,
+    oath: oathResult.status !== 0 || (await readFile(join(oathDir, "package.json"), "utf8")) === fixtureManifest
+  };
+  // Optional interop probe: after Oath materializes the tree, npm must find
+  // nothing to do. Opt in with OATH_COMPAT_INTEROP=1; it is reported, not yet
+  // required, until Oath writes package-lock.json itself.
+  let interop = null;
+  if (process.env.OATH_COMPAT_INTEROP === "1" && oathResult.status === 0 && command === "install") {
+    const before = oathTree;
+    const npmAfterOath = run(npmCommand, [...npmArgs(), "--no-audit", "--no-fund"], oathDir, home);
+    const after = npmAfterOath.status === 0 ? await installedTree(join(oathDir, "node_modules")) : [];
+    interop = {
+      status: npmAfterOath.status,
+      tree_unchanged: npmAfterOath.status === 0 && JSON.stringify(before) === JSON.stringify(after),
+      stdout_tail: npmAfterOath.stdout.slice(-400),
+      stderr_tail: npmAfterOath.stderr.slice(-400)
+    };
+  }
   const npmSet = new Set(npmTree);
   const oathSet = new Set(oathTree);
   const includeTree = process.env.OATH_COMPAT_INCLUDE_TREES === "1";
@@ -164,13 +186,15 @@ try {
     classification: npmResult.status !== 0 ? "reference_rejected" : pinnedLockAccepted ? "compared" : "pinned_lock_mutated",
     npm: { ...npmResult, ...treeEvidence(npmTree, includeTree) },
     oath: { ...oathResult, ...treeEvidence(oathTree, includeTree) },
+    manifest_stable: manifestStable,
+    ...(interop ? { interop } : {}),
     differences: {
       npm_only_count: npmTree.filter(entry => !oathSet.has(entry)).length,
       oath_only_count: oathTree.filter(entry => !npmSet.has(entry)).length,
       npm_only_sample: npmTree.filter(entry => !oathSet.has(entry)).slice(0, 100),
       oath_only_sample: oathTree.filter(entry => !npmSet.has(entry)).slice(0, 100)
     },
-    equivalent: npmResult.status === 0 && oathResult.status === 0 && pinnedLockAccepted && JSON.stringify(npmTree) === JSON.stringify(oathTree)
+    equivalent: npmResult.status === 0 && oathResult.status === 0 && pinnedLockAccepted && manifestStable.npm && manifestStable.oath && JSON.stringify(npmTree) === JSON.stringify(oathTree)
   };
   console.log(JSON.stringify(artifact, null, 2));
   if (!artifact.equivalent) process.exitCode = 1;

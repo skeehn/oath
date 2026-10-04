@@ -17,7 +17,7 @@
 //!         foo/        <- nested (different version required by bar)
 
 use anyhow::{Context, Result, bail};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -114,6 +114,10 @@ fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
 /// Links resolved packages into a project's node_modules
 pub struct Linker {
     store: ContentStore,
+    /// Canonical directories outside the project root that the project's own
+    /// manifests declared as `file:` dependencies. npm symlinks those; a link
+    /// target declared only by a transitive dependency is still refused.
+    external_link_targets: HashSet<PathBuf>,
 }
 
 /// Plan for how to lay out packages in node_modules
@@ -160,7 +164,19 @@ fn remove_existing_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn validated_workspace_target(project_dir: &Path, target: &Path) -> Result<PathBuf> {
+    validated_link_target(project_dir, target, &HashSet::new())
+}
+
+/// Resolve a link node's target. Targets inside the project are always
+/// accepted. Targets outside it are accepted only when the project's own
+/// manifests declared them (`allowed_external`), never on a dependency's say-so.
+fn validated_link_target(
+    project_dir: &Path,
+    target: &Path,
+    allowed_external: &HashSet<PathBuf>,
+) -> Result<PathBuf> {
     let project = std::fs::canonicalize(project_dir).context("resolve workspace project root")?;
     let candidate = if target.is_absolute() {
         target.to_path_buf()
@@ -171,7 +187,7 @@ fn validated_workspace_target(project_dir: &Path, target: &Path) -> Result<PathB
     match std::fs::canonicalize(&candidate) {
         Ok(canonical) => {
             anyhow::ensure!(
-                canonical.starts_with(&project),
+                canonical.starts_with(&project) || allowed_external.contains(&canonical),
                 "workspace link escapes project: {}",
                 target.display()
             );
@@ -208,7 +224,18 @@ fn validated_workspace_target(project_dir: &Path, target: &Path) -> Result<PathB
 
 impl Linker {
     pub fn new(store: ContentStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            external_link_targets: HashSet::new(),
+        }
+    }
+
+    /// Permit link nodes whose targets resolve to these canonical directories
+    /// even though they live outside the project root. Callers derive the set
+    /// from the project's own `file:` dependency declarations.
+    pub fn with_external_link_targets(mut self, targets: HashSet<PathBuf>) -> Self {
+        self.external_link_targets = targets;
+        self
     }
 
     /// Materialize Arborist's exact physical locations from verified CAS entries.
@@ -282,12 +309,19 @@ impl Linker {
                     .target
                     .as_ref()
                     .context("Arborist link node has no target")?;
-                let target = validated_workspace_target(project_dir, Path::new(target))?;
+                let target = validated_link_target(
+                    project_dir,
+                    Path::new(target),
+                    &self.external_link_targets,
+                )?;
                 if let Some(parent) = destination.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 symlink_dir(&target, &destination)?;
                 result.symlinks += 1;
+                // npm links the bins of workspace and file: packages too.
+                result.bins +=
+                    link_package_bins(&stage, &destination, &target, node.install_name.as_str())?;
                 continue;
             }
             if preserve_existing && node.reuse_existing {
@@ -326,24 +360,12 @@ impl Linker {
                 result.linked += 1;
             }
 
-            let install_name = node.install_name.as_str();
-            let bins = read_bin_entries(&destination.join("package.json"), install_name);
-            let node_modules = destination
-                .parent()
-                .context("placement has no node_modules parent")?;
-            let bin_dir = node_modules.join(".bin");
-            for (bin_name, bin_path) in bins {
-                let target = destination.join(&bin_path);
-                if !target.exists() {
-                    continue;
-                }
-                std::fs::create_dir_all(&bin_dir)?;
-                let link = bin_dir.join(bin_name);
-                if !link.exists() {
-                    symlink_file(&pathdiff_relative(&link, &target), &link)?;
-                    result.bins += 1;
-                }
-            }
+            result.bins += link_package_bins(
+                &stage,
+                &destination,
+                &destination,
+                node.install_name.as_str(),
+            )?;
         }
         std::fs::write(
             stage.join(".oath").join("placement-plan.json"),
@@ -862,6 +884,77 @@ pub struct LinkResult {
 
 /// Read bin entries from a package.json file
 /// Returns Vec<(bin_name, relative_path)>
+/// The `.bin` directory that owns a placement: the nearest enclosing
+/// `node_modules` directory. The staged top-level tree is not literally named
+/// `node_modules`, so the stage root itself counts. A scoped package at
+/// `node_modules/@scope/pkg` therefore links into `node_modules/.bin`, not
+/// `node_modules/@scope/.bin`.
+fn bin_dir_for_placement(stage: &Path, destination: &Path) -> PathBuf {
+    let mut current = destination.parent();
+    while let Some(dir) = current {
+        if dir == stage || dir.file_name() == Some(OsStr::new("node_modules")) {
+            return dir.join(".bin");
+        }
+        current = dir.parent();
+    }
+    stage.join(".bin")
+}
+
+/// Link every `bin` entry of the package materialized at `destination` into
+/// the owning `.bin` directory. `package_root` is where the package's files
+/// actually live (the placement itself, or a link node's target). Returns the
+/// number of links created. Existing links win, matching npm's bin-links,
+/// which never clobbers a bin another package already provided.
+fn link_package_bins(
+    stage: &Path,
+    destination: &Path,
+    package_root: &Path,
+    install_name: &str,
+) -> Result<usize> {
+    let bins = read_bin_entries(&package_root.join("package.json"), install_name);
+    if bins.is_empty() {
+        return Ok(0);
+    }
+    let bin_dir = bin_dir_for_placement(stage, destination);
+    let mut created = 0usize;
+    for (bin_name, bin_path) in bins {
+        let target = package_root.join(&bin_path);
+        if !target.is_file() {
+            continue;
+        }
+        // npm's fix-bin makes the target executable regardless of the mode
+        // recorded in the tarball.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&target) {
+                let mut perms = meta.permissions();
+                if perms.mode() & 0o111 != 0o111 {
+                    perms.set_mode(perms.mode() | 0o111);
+                    std::fs::set_permissions(&target, perms).ok();
+                }
+            }
+        }
+        std::fs::create_dir_all(&bin_dir)?;
+        let link = bin_dir.join(&bin_name);
+        if link.symlink_metadata().is_ok() {
+            continue;
+        }
+        // Link relative to the placement, not the resolved package root, so
+        // the symlink text matches npm's and survives moving the project.
+        let link_target = pathdiff_relative(&link, &destination.join(&bin_path));
+        symlink_file(&link_target, &link).with_context(|| {
+            format!(
+                "failed to link bin {} -> {}",
+                link.display(),
+                link_target.display()
+            )
+        })?;
+        created += 1;
+    }
+    Ok(created)
+}
+
 fn read_bin_entries(pkg_json_path: &Path, install_name: &str) -> Vec<(String, PathBuf)> {
     let content = match std::fs::read_to_string(pkg_json_path) {
         Ok(c) => c,
@@ -1187,6 +1280,7 @@ mod tests {
             ],
             removed_locations: vec![],
             invalid_edges: vec![],
+            root_manifest: None,
         };
         Linker::new(store)
             .link_placement_plan(&plan, tmp.path())
@@ -1230,6 +1324,7 @@ mod tests {
             }],
             removed_locations: vec![],
             invalid_edges: vec![],
+            root_manifest: None,
         };
 
         let store = ContentStore::new(tmp.path().join("store")).unwrap();
@@ -1377,6 +1472,7 @@ mod tests {
             ],
             removed_locations: vec!["node_modules/stale".into()],
             invalid_edges: vec![],
+            root_manifest: None,
         };
 
         Linker::new(store)
@@ -1400,6 +1496,175 @@ mod tests {
                 .exists()
         );
         assert!(!live.join("stale").exists());
+    }
+
+    fn test_plan(project: &Path, nodes: Vec<PlacementNode>) -> PlacementPlan {
+        PlacementPlan {
+            schema_version: 2,
+            planner: PlannerIdentity {
+                name: "@npmcli/arborist".into(),
+                npm: "11.12.1".into(),
+            },
+            project: project.display().to_string(),
+            nodes,
+            removed_locations: vec![],
+            invalid_edges: vec![],
+            root_manifest: None,
+        }
+    }
+
+    fn test_node(location: &str, install_name: &str, name: &str, version: &str) -> PlacementNode {
+        PlacementNode {
+            location: location.into(),
+            install_name: install_name.into(),
+            name: name.into(),
+            version: version.into(),
+            resolved: None,
+            integrity: None,
+            dev: false,
+            optional: false,
+            has_install_script: false,
+            reuse_existing: false,
+            link: false,
+            target: None,
+            edges: vec![],
+        }
+    }
+
+    fn store_bin_package(store: &ContentStore, root: &Path, name: &str, bin: &str) {
+        let extracted = root.join(format!("extracted-{}", name.replace('/', "__")));
+        std::fs::create_dir_all(extracted.join("bin")).unwrap();
+        std::fs::write(
+            extracted.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0","bin":{{"{bin}":"bin/cli.js"}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(extracted.join("bin/cli.js"), "#!/usr/bin/env node\n").unwrap();
+        store.store_package(name, "1.0.0", &extracted).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_package_bins_link_into_the_owning_node_modules_bin() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().join("store")).unwrap();
+        store_bin_package(&store, tmp.path(), "@scope/tool", "scoped-tool");
+        store_bin_package(&store, tmp.path(), "plain", "plain-tool");
+        store_bin_package(&store, tmp.path(), "@nested/tool", "nested-tool");
+
+        let plan = test_plan(
+            tmp.path(),
+            vec![
+                test_node(
+                    "node_modules/@scope/tool",
+                    "@scope/tool",
+                    "@scope/tool",
+                    "1.0.0",
+                ),
+                test_node("node_modules/plain", "plain", "plain", "1.0.0"),
+                test_node(
+                    "node_modules/plain/node_modules/@nested/tool",
+                    "@nested/tool",
+                    "@nested/tool",
+                    "1.0.0",
+                ),
+            ],
+        );
+        let result = Linker::new(store)
+            .link_placement_plan(&plan, tmp.path())
+            .unwrap();
+        assert_eq!(result.bins, 3);
+
+        let live = tmp.path().join("node_modules");
+        assert!(
+            !live.join("@scope/.bin").exists(),
+            "bins must not land under the scope dir"
+        );
+        assert_eq!(
+            std::fs::read_link(live.join(".bin/scoped-tool")).unwrap(),
+            PathBuf::from("../@scope/tool/bin/cli.js")
+        );
+        assert_eq!(
+            std::fs::read_link(live.join(".bin/plain-tool")).unwrap(),
+            PathBuf::from("../plain/bin/cli.js")
+        );
+        assert_eq!(
+            std::fs::read_link(live.join("plain/node_modules/.bin/nested-tool")).unwrap(),
+            PathBuf::from("../@nested/tool/bin/cli.js")
+        );
+        let mode = std::fs::metadata(live.join("@scope/tool/bin/cli.js"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "bin targets are made executable like npm's fix-bin"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_link_nodes_get_bins_and_external_targets_need_an_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let sibling = tmp.path().join("sibling");
+        std::fs::create_dir_all(project.join("packages/tool/bin")).unwrap();
+        std::fs::create_dir_all(sibling.join("bin")).unwrap();
+        std::fs::write(
+            project.join("packages/tool/package.json"),
+            r#"{"name":"tool","version":"1.0.0","bin":"bin/tool.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(project.join("packages/tool/bin/tool.js"), "").unwrap();
+        std::fs::write(
+            sibling.join("package.json"),
+            r#"{"name":"sibling","version":"1.0.0","bin":{"sib":"bin/sib.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(sibling.join("bin/sib.js"), "").unwrap();
+
+        let link = |location: &str, name: &str, target: &Path| {
+            let mut node = test_node(location, name, name, "1.0.0");
+            node.link = true;
+            node.target = Some(target.display().to_string());
+            node
+        };
+        let plan = test_plan(
+            &project,
+            vec![
+                link("node_modules/tool", "tool", &project.join("packages/tool")),
+                link("node_modules/sibling", "sibling", &sibling),
+            ],
+        );
+
+        let store = ContentStore::new(tmp.path().join("store")).unwrap();
+        let refused = Linker::new(store.clone())
+            .link_placement_plan(&plan, &project)
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("workspace link escapes project")
+        );
+
+        let allowed: HashSet<PathBuf> = [sibling.canonicalize().unwrap()].into_iter().collect();
+        let result = Linker::new(store)
+            .with_external_link_targets(allowed)
+            .link_placement_plan(&plan, &project)
+            .unwrap();
+        assert_eq!(result.symlinks, 2);
+        assert_eq!(result.bins, 2);
+        let live = project.join("node_modules");
+        assert_eq!(
+            std::fs::read_link(live.join(".bin/tool")).unwrap(),
+            PathBuf::from("../tool/bin/tool.js")
+        );
+        assert_eq!(
+            std::fs::read_link(live.join(".bin/sib")).unwrap(),
+            PathBuf::from("../sibling/bin/sib.js")
+        );
     }
 
     #[test]
@@ -1450,6 +1715,7 @@ mod tests {
             }],
             removed_locations: vec![],
             invalid_edges: vec![],
+            root_manifest: None,
         };
 
         Linker::new(store)

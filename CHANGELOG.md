@@ -5,6 +5,55 @@ All notable changes to oath are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- Bins of scoped packages now link into the owning `node_modules/.bin`
+  directory instead of `node_modules/@scope/.bin`; bin targets are made
+  executable like npm's `fix-bin`; workspace and `file:` link packages get
+  their bins linked too. The parity comparator now includes `.bin` on POSIX.
+- `oath why` and `oath graph` work on Arborist-mode lockfiles, whose keys are
+  `node_modules/...` locations rather than `name@version`.
+- `oath add` and `oath remove` write `package.json` the way npm does: key
+  order, indentation, line endings, and trailing newline are preserved;
+  dependency sections are sorted and pruned like `@npmcli/package-json`; the
+  saved spec comes from Arborist (`save-prefix` ranges, `npm:` aliases, git
+  shortcuts, relative `file:` paths), so `oath install github:owner/repo` or
+  `./local-dir` no longer writes a bogus dependency key.
+- `oath init` refuses to overwrite an existing `package.json`.
+- `oath remove` of the last dependency no longer deletes `node_modules`.
+- Dependency install scripts run in dependency order, only for placements
+  Arborist added or changed, and always inside the package's real install
+  location; the shared content store is never a script working directory.
+- Static analysis, license policy, and the risk ceiling now run on the
+  verified store copy before anything is linked, so no lifecycle hook can run
+  before the policy gate.
+- `banned_packages` refuses the install before download; `banned_licenses`,
+  `max_risk_level`, `require_approval`, and `block_install_scripts` from
+  `oath-policy.toml` are enforced (they were parsed and ignored).
+- A failed optional dependency download is skipped and pruned from the tree
+  like npm instead of aborting the install.
+- Package tarballs containing symlink or hardlink entries are extracted with
+  the link entries skipped, matching pacote, instead of failing.
+- `file:` dependencies declared by the project's own manifests may point
+  outside the project root; targets declared only by transitive dependencies
+  are still refused.
+- `oath ci` works at a workspace root by comparing the lock against the merged
+  workspace dependencies.
+- `oath exec` on a locally installed bin now scans and gates it instead of
+  bypassing assessment, and honors a requested version. `--json` is an
+  assessment-only interface and requires `--dry-run`, so stdout carries one
+  document. Exit codes are returned instead of calling `process::exit`, so
+  temporary install directories are cleaned up. Native Linux containment uses
+  the Node on `PATH` (nvm, Volta, fnm) instead of a hardcoded `/usr/bin/node`.
+- The HTTP client trusts extra CA bundles from `npm_config_cafile` and
+  `NODE_EXTRA_CA_CERTS`, so TLS-inspecting proxies work as they do with npm.
+- README no longer claims baseline commands run without Node.
+- `oath exec <pkg> --flag` passes flags after the package name to the binary,
+  as npx does, instead of rejecting them.
+- Piping output (`oath graph | head`) no longer panics on a closed pipe.
+- Install scripts of `file:` packages linked from the project root run on
+  every install under the same trust policy, matching npm's rebuild of
+  root-managed links.
+
 ## [0.2.5] - 2026-07-16
 
 ### Changed

@@ -38,3 +38,4 @@ rayon = "1"
 node-semver.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
+libc.workspace = true

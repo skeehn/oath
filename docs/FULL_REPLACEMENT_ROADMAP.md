@@ -506,6 +506,11 @@ engineer; halve the calendar time with two.
 
 ### Phase 0: truth and correctness (weeks 0–3, ~3 ew)
 
+**Status: delivered.** Every item below landed together with three bugs found
+while verifying them (SIGPIPE panics when piping output, `oath exec` rejecting
+flags after the package name, and lifecycle scripts of root-linked `file:`
+packages never running).
+
 Goal: nothing Oath does silently corrupts a project, and the docs match the
 binary.
 

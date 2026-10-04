@@ -253,6 +253,18 @@ fn extract_archive<R: Read>(reader: R, dest: &Path, limits: &TarballLimits) -> R
                     })?;
                 }
             }
+            // npm's extractor (pacote) drops link entries from package
+            // tarballs instead of failing the install. A tarball cannot
+            // legitimately point outside itself, and a link inside the package
+            // is a packaging mistake, so skip the entry and keep the files.
+            tar::EntryType::Symlink | tar::EntryType::Link => {
+                tracing::warn!(
+                    "skipping {:?} entry {} (links are not materialized from package tarballs)",
+                    entry.header().entry_type(),
+                    path.display()
+                );
+                continue;
+            }
             other => {
                 bail!(
                     "unsupported tar entry type {:?} for {}",
@@ -408,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_tarball_rejects_symlinks() {
+    fn extract_tarball_skips_symlinks_like_pacote() {
         let gz = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gz);
         let mut header = Header::new_gnu();
@@ -419,10 +431,24 @@ mod tests {
         header.set_cksum();
         tar.append_data(&mut header, "package/link", std::io::empty())
             .unwrap();
+        let mut file = Header::new_gnu();
+        file.set_size(5);
+        file.set_mode(0o644);
+        file.set_cksum();
+        tar.append_data(&mut file, "package/index.js", &b"hello"[..])
+            .unwrap();
         let data = tar.into_inner().unwrap().finish().unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        assert!(extract_tarball(&data, tmp.path()).is_err());
+        extract_tarball(&data, tmp.path()).unwrap();
+        assert!(
+            tmp.path().join("link").symlink_metadata().is_err(),
+            "link entry must not be materialized"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("index.js")).unwrap(),
+            b"hello"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ Public claims are evidence-gated. Do not write docs, comments, or website copy t
 
 ## Commands
 
-Build prerequisites: Rust 1.94+, Node.js (the Arborist planner shells out to `node`), and on Debian/Ubuntu `libseccomp-dev` for the Linux sandbox linker dependency.
+Build prerequisites: Rust 1.94+, Node.js (the Arborist planner shells out to `node`), npm 11.12.1 on `PATH` for the parity harness, and on Debian/Ubuntu `libseccomp-dev` plus `bubblewrap` for the Linux sandbox. Behind a TLS-inspecting proxy, set `NODE_EXTRA_CA_CERTS` (the Rust client honors it too).
 
 ```sh
 cargo fmt --all -- --check
@@ -40,6 +40,13 @@ Full local gate before a PR that touches resolver/fetch/install/exec/release beh
 
 ```sh
 scripts/launch-check.sh
+```
+
+Run one parity fixture locally (builds nothing; needs `target/debug/oath`):
+
+```sh
+OATH_BIN=target/debug/oath node scripts/npm-parity.mjs tests/compat/fixtures/scoped-package
+OATH_COMPAT_INTEROP=1 OATH_BIN=target/debug/oath node scripts/npm-parity.mjs tests/compat/fixtures/basic  # also probes npm-after-oath
 ```
 
 Other checks CI runs that are easy to forget:
@@ -76,13 +83,13 @@ Cargo workspace under `crates/`. Dependency direction is strictly bottom-up; `oa
 
 1. **Placement**: `ArboristPlanner` (`oath-resolve/src/placement.rs`) extracts a vendored `npm-11.12.1.tgz` (`crates/oath-resolve/vendor/`, SHA-256 pinned) and runs the embedded `arborist-plan.cjs` under `node` with `reify({dryRun: true, ignoreScripts: true})`. The result is a versioned `PlacementPlan` of exact `node_modules` locations. Non-dry reify is forbidden by design (ADR-0001 in `docs/adr/`). `OATH_RESOLVER=legacy` switches to the old Rust resolver as a diagnostic canary only. Plan node keys are locations, not `name@version`, because peer contexts can duplicate a version.
 2. **Fetch + verify**: `oath-fetch` downloads each planned tarball, checks the lockfile integrity, and unpacks under `TarballLimits` (entry count / unpacked bytes, overridable with `OATH_MAX_TARBALL_ENTRIES` / `OATH_MAX_UNPACKED_BYTES`).
-3. **Analyze + policy**: `PackageScanner` produces findings and a risk level; `OathPolicy` decides (banned packages/licenses, `block_install_scripts`, `max_risk_level`). Lifecycle scripts never run before this gate.
+3. **Analyze + policy**: `PackageScanner` produces findings and a risk level; `OathPolicy` decides (`banned_packages` before download; `banned_licenses`, `max_risk_level`, `require_approval` on the verified store copy before linking; `block_install_scripts`/`allow_install_scripts` at script time). Lifecycle scripts never run before this gate: dependency scripts run after the atomic link, in dependency order, only for placements Arborist reported as added or changed.
 4. **Store + link**: `ContentStore` writes into the CAS; `Linker` builds a staging tree and commits it atomically, so a failed install leaves the previous `node_modules` intact. `oath verify` re-hashes store manifests and fails on tamper.
 5. **Evidence**: `oath-transparency` appends a chained record.
 
 ### Exec / publish decision contracts
 
-`oath exec` and `oath publish` produce signed assessments defined in `oath-contracts`. The contract surface is published in `contracts/` (JSON Schemas, `oath-contracts.ts`, OpenAPI, JS/Python/Go verifiers) and regenerated examples live in `contracts/examples/`. Adding a reason code requires synchronized changes to the Rust enum, TypeScript types, schema, examples, and bundle manifest; changing or removing one requires a new schema version. The previous schema version stays available via `--schema-version` for one major release. JSON output modes reserve stdout for exactly one document.
+`oath exec` and `oath publish` produce signed assessments defined in `oath-contracts`. Both `--json` modes require `--dry-run`. The contract surface is published in `contracts/` (JSON Schemas, `oath-contracts.ts`, OpenAPI, JS/Python/Go verifiers) and regenerated examples live in `contracts/examples/`. Adding a reason code requires synchronized changes to the Rust enum, TypeScript types, schema, examples, and bundle manifest; changing or removing one requires a new schema version. The previous schema version stays available via `--schema-version` for one major release. JSON output modes reserve stdout for exactly one document.
 
 Sandbox mode semantics: `--sandbox-mode auto` must fail closed when the native backend lacks any of filesystem/network/process/resource controls, unless `--allow-degraded-sandbox` is passed, in which case the output records `sandbox_degraded_allowed`. Approvals are bound to the tarball integrity hash, not the package name.
 
