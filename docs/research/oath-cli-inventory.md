@@ -182,6 +182,17 @@ There is no support for `_auth`, username/password, `always-auth`, `proxy`/`http
 ---
 
 ## 3. `oath exec` vs npx
+
+> **Phase 1 update.** `exec` was rewritten into `crates/oath-cli/src/exec.rs`
+> (resolution, cache, gate), `exec_spec.rs` (npm-package-arg-style specs,
+> `getBinFromManifest`, `npm init` initializer mapping), `exec_cache.rs`
+> (`~/.oath/cache/_npx` and `oath cache npx ls|rm|info`), and `launch.rs`
+> (shebang launcher, PATH and `npm_*` environment, CI and TTY detection).
+> Resolution follows libnpmexec; the local tree is used when it satisfies
+> every spec; otherwise the exec cache is planned with Arborist `add`, linked
+> from the verified store, scanned, gated, its lifecycle scripts run under
+> install's trust rules, and the bin launched. The notes below describe the
+> pre-Phase-1 binary at commit 5d71c0a.
 - **Package and bin selection:**
   - `parse_package_spec` splits `pkg@spec` (`main.rs:3251`). Only registry packages are supported because it calls `fetch_packument(name)` (`main.rs:3272-3277`).
   - `resolve_version` handles dist-tags, ranges and `npm:` (`resolve.rs:23-58`).

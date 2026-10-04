@@ -1281,6 +1281,7 @@ mod tests {
             removed_locations: vec![],
             invalid_edges: vec![],
             root_manifest: None,
+            added: Vec::new(),
         };
         Linker::new(store)
             .link_placement_plan(&plan, tmp.path())
@@ -1325,6 +1326,7 @@ mod tests {
             removed_locations: vec![],
             invalid_edges: vec![],
             root_manifest: None,
+            added: Vec::new(),
         };
 
         let store = ContentStore::new(tmp.path().join("store")).unwrap();
@@ -1473,6 +1475,7 @@ mod tests {
             removed_locations: vec!["node_modules/stale".into()],
             invalid_edges: vec![],
             root_manifest: None,
+            added: Vec::new(),
         };
 
         Linker::new(store)
@@ -1512,6 +1515,7 @@ mod tests {
             removed_locations: vec![],
             invalid_edges: vec![],
             root_manifest: None,
+            added: Vec::new(),
         }
     }
 
@@ -1722,6 +1726,7 @@ mod tests {
             removed_locations: vec![],
             invalid_edges: vec![],
             root_manifest: None,
+            added: Vec::new(),
         };
 
         Linker::new(store)

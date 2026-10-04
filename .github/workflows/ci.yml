@@ -46,6 +46,8 @@ jobs:
         run: node scripts/project-corpus.mjs self-test
       - name: Test installed-tree evidence normalization
         run: node --test scripts/tree-evidence.test.mjs
+      - name: Test exec parity normalization and fixture set
+        run: node --test scripts/exec-parity.test.mjs
       - name: Test GA evidence gate derivation
         run: node --test scripts/generate-ga-evidence.test.mjs
       - name: Validate all pinned corpus lock artifacts
@@ -184,6 +186,33 @@ jobs:
         with:
           name: compatibility-independent-behavioral-${{ runner.os }}
           path: compat-results/behavioral-${{ runner.os }}/behavioral-summary.json
+
+  exec-parity:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.13.0
+      - run: npm install --global npm@11.12.1
+      - name: Install Linux sandbox linker dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+      - run: cargo build --locked --bin oath
+      - name: Compare npx and oath x on the exec fixture set
+        run: node scripts/exec-parity.mjs
+        env:
+          OATH_BIN: ${{ runner.os == 'Windows' && 'target/debug/oath.exe' || 'target/debug/oath' }}
+          OATH_EXEC_PARITY_RESULTS: compat-results/exec-parity-${{ runner.os }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: exec-parity-${{ runner.os }}
+          path: compat-results/exec-parity-${{ runner.os }}/exec-parity-summary.json
 
   npm-reference-canary:
     continue-on-error: true
@@ -654,6 +683,7 @@ jobs:
       - detection-gate-harness
       - audit-readiness
       - independent-behavioral
+      - exec-parity
       - postgres-registry
       - registry-container
       - msrv
@@ -678,6 +708,7 @@ jobs:
           AUDIT_READINESS: ${{ needs.audit-readiness.result }}
           FIXTURES: ${{ needs.compatibility-scale.result }}
           BEHAVIORS: ${{ needs.independent-behavioral.result }}
+          EXEC_PARITY: ${{ needs.exec-parity.result }}
           PROJECTS: ${{ needs.real-project-aggregate.result }}
           LINUX: ${{ needs.native-linux-security.result }}
           MACOS: ${{ needs.native-macos-security.result }}
@@ -697,6 +728,7 @@ jobs:
           test "$DETECTION_HARNESS" = success
           test "$AUDIT_READINESS" = success
           test "$BEHAVIORS" = success
+          test "$EXEC_PARITY" = success
           test "$FIXTURES" = success
           test "$PROJECTS" = success
           test "$LINUX" = success

@@ -40,11 +40,32 @@ async function main () {
   // npm's save-prefix / save-exact decide how added registry packages are
   // written back to package.json.
   const savePrefix = boolOption('save-exact') ? '' : stringOption('save-prefix', '^')
+  const arboristRequire = createRequire(require.resolve('@npmcli/arborist/package.json', { paths: [process.env.OATH_ARBORIST_PATH || process.cwd()] }))
+  // npm's min-release-age is a relative `before` cutoff handed to pacote, so
+  // npm-pick-manifest only considers versions published by then. Excluded
+  // packages see no cutoff at all, which is what min-release-age-exclude
+  // means: pacote.manifest is wrapped because that is the single call site
+  // Arborist uses to pick a version for a dependency edge.
+  const before = request.before ? new Date(request.before) : null
+  if (before && Number.isNaN(before.getTime())) throw new Error(`invalid before cutoff ${request.before}`)
+  const excluded = new Set(Array.isArray(request.min_release_age_exclude) ? request.min_release_age_exclude : [])
+  if (before && excluded.size) {
+    const pacote = arboristRequire('pacote')
+    const npa = arboristRequire('npm-package-arg')
+    const originalManifest = pacote.manifest
+    pacote.manifest = (spec, opts = {}) => {
+      let name = null
+      try { name = (typeof spec === 'string' ? npa(spec) : spec).name } catch {}
+      if (name && excluded.has(name)) return originalManifest(spec, { ...opts, before: null })
+      return originalManifest(spec, opts)
+    }
+  }
   const arborist = new Arborist({
     path: project,
     audit: false,
     ignoreScripts: true,
     savePrefix,
+    ...(before ? { before } : {}),
     legacyPeerDeps: boolOption('legacy-peer-deps'),
     strictPeerDeps: boolOption('strict-peer-deps'),
     // npm 11 defaults install-links to false: local directory dependencies
@@ -110,6 +131,10 @@ async function main () {
   const invalid_edges = nodes.flatMap(node => node.edges.filter(edge => !edge.valid).map(edge => ({ location: node.location, ...edge })))
   const wantsManifest = (request.add && request.add.length) || (request.rm && request.rm.length)
   const root_manifest = wantsManifest ? savedRootManifest(arborist, tree, request, savePrefix) : null
+  // Each add spec with the name Arborist resolved for it: registry specs carry
+  // their own, while git, directory, and tarball specs only learn theirs from
+  // the fetched manifest.
+  const added = (arborist[Symbol.for('resolvedAdd')] || []).map(spec => ({ raw: spec.raw, name: spec.name }))
   process.stdout.write(JSON.stringify({
     schema_version: 2,
     planner: { name: '@npmcli/arborist', npm: process.env.OATH_NPM_REFERENCE_VERSION || execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim() },
@@ -117,7 +142,8 @@ async function main () {
     nodes,
     removed_locations,
     invalid_edges,
-    root_manifest
+    root_manifest,
+    added
   }))
 }
 
@@ -128,7 +154,7 @@ async function main () {
 // shortcuts, relative file: paths) and @npmcli/package-json's dependency
 // ordering are replayed here from the same sources.
 function savedRootManifest (arborist, tree, request, savePrefix) {
-  const arboristRequire = createRequire(join(require.resolve('@npmcli/arborist/package.json', { paths: [process.env.OATH_ARBORIST_PATH || process.cwd()] })))
+  const arboristRequire = createRequire(require.resolve('@npmcli/arborist/package.json', { paths: [process.env.OATH_ARBORIST_PATH || process.cwd()] }))
   const npa = arboristRequire('npm-package-arg')
   const { subset, intersects } = arboristRequire('semver')
   const updateDependencies = arboristRequire('@npmcli/package-json/lib/update-dependencies.js')

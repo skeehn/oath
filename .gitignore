@@ -19,3 +19,4 @@ compat-results/ga/*
 compat-results/ga-local/
 __pycache__/
 *.pyc
+compat-results/exec-parity*/

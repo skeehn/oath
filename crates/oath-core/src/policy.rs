@@ -42,6 +42,9 @@ struct RawPolicy {
     allow_install_scripts: Vec<String>,
     block_install_scripts: Option<bool>,
     max_risk_level: Option<String>,
+    min_release_age: Option<String>,
+    #[serde(default)]
+    min_release_age_exclude: Vec<String>,
 }
 
 /// Policy loaded from oath-policy.toml (project or global ~/.oath/policy.toml)
@@ -59,6 +62,12 @@ pub struct OathPolicy {
     pub block_install_scripts: bool,
     /// String form of the max acceptable risk level: "low"|"medium"|"high"|"critical"
     pub max_risk_level: String,
+    /// Default release-age cooldown for `oath exec` (npm's `min-release-age`):
+    /// a day count like "7" or a duration like "7d" / "24h". `None` means no
+    /// cooldown unless the command line or `.npmrc` sets one.
+    pub min_release_age: Option<String>,
+    /// Packages exempt from the cooldown (`min-release-age-exclude`).
+    pub min_release_age_exclude: Vec<String>,
 }
 
 impl Default for OathPolicy {
@@ -71,6 +80,8 @@ impl Default for OathPolicy {
             allow_install_scripts: vec![],
             block_install_scripts: false,
             max_risk_level: "critical".to_string(),
+            min_release_age: None,
+            min_release_age_exclude: vec![],
         }
     }
 }
@@ -134,6 +145,14 @@ impl OathPolicy {
         }
         if let Some(v) = raw.max_risk_level {
             self.max_risk_level = v;
+        }
+        if let Some(v) = raw.min_release_age {
+            self.min_release_age = Some(v);
+        }
+        for p in raw.min_release_age_exclude {
+            if !self.min_release_age_exclude.contains(&p) {
+                self.min_release_age_exclude.push(p);
+            }
         }
     }
 

@@ -231,9 +231,13 @@ oath install -g typescript         # global install
 oath add lodash                    # add a dependency
 oath remove lodash                 # remove a dependency
 oath run build                     # run a project script
-oath exec prettier .               # assessed npx-style execution
+oath x prettier .                  # npx replacement: assessed, cached, then run
+oath x -p typescript tsc --version # command from a package with a different name
+oath x -c 'node -e "..."'          # a shell script with the package bins on PATH
+oath init vite my-app              # runs create-vite like `npm init vite`
 oath exec --dry-run --json tsx     # inspect without running
 oath exec --sandbox-mode native tsx # require native containment
+oath cache npx ls                  # the exec cache, as `npm cache npx ls` shows it
 oath scan                          # scan installed dependencies
 oath verify                        # verify lock and store integrity
 oath log                           # inspect the local transparency log
@@ -308,16 +312,40 @@ OATH_MAX_TARBALL_ENTRIES=400000 oath install
 
 ## Execution boundaries
 
+`oath x` (alias `oath exec`) resolves a command the way `npx` does: a bin of
+the current project, then a `node_modules/.bin` found walking up from it,
+then Oath's global bin directory, then a package spec (registry, git, local
+directory or tarball, remote tarball). Specs the local tree already satisfies
+run from it without a download. Anything else is installed into the exec
+cache at `~/.oath/cache/_npx/<key>` through the same planner, verified store,
+and linker as `oath install`, scanned, and gated before its lifecycle scripts
+or bin run. The first run of a spec asks once on a terminal (npm's rule:
+never in CI or without a TTY, never with `--yes`); later runs are silent and
+start in well under a second. Tags and ranges are re-checked against the
+registry after 24 hours (`--prefer-online` forces the check, `--prefer-offline`
+skips it, `--offline` refuses downloads, `--no-install` refuses installs).
+Oath's own output goes to stderr; stdout belongs to the program.
+
 Plain `oath exec` defaults to compatibility behavior. For agents or unfamiliar
 packages, request a boundary explicitly:
 
 ```sh
 oath exec --dry-run --json <package>
-oath exec --sandbox <package> -- <args>
+oath exec --json-file verdict.json <package> <args>
+oath exec --sandbox <package> <args>
 oath exec --sandbox-mode native <package>
+oath exec --min-release-age 7 --min-release-age-exclude <trusted> <package>
 OATH_AGENT_MODE=1 oath exec <package>
 oath exec --sandbox-mode node --allow-degraded-sandbox <package>
 ```
+
+In sandbox modes the current directory is the working directory and is
+writable (formatters and scaffolders write there), the exec cache entry is
+read-only, and the network is denied unless the package was assessed as
+needing it and `--deny-network` is absent. `--min-release-age` skips versions
+published more recently than the cooldown at resolution time, like npm 11's
+`min-release-age`; it can also come from `.npmrc` or from `min_release_age`
+in `oath-policy.toml`.
 
 - Linux strict mode requires bubblewrap namespaces, Landlock ABI V6, seccomp,
   `no_new_privs`, and resource limits.

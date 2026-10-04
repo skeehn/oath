@@ -153,6 +153,18 @@ pub fn run(
     program: &std::path::Path,
     args: &[String],
 ) -> anyhow::Result<ExitStatus> {
+    run_with_env(plan, program, args, &[])
+}
+
+/// Like [`run`], but also sets `extra_env` in the AppContainer process. The
+/// values are explicit, caller-computed variables (an exec's PATH and `npm_*`
+/// environment), applied after the plan's host allowlist.
+pub fn run_with_env(
+    plan: &SandboxPlan,
+    program: &std::path::Path,
+    args: &[String],
+    extra_env: &[(String, String)],
+) -> anyhow::Result<ExitStatus> {
     anyhow::ensure!(
         plan.network == crate::NetworkMode::Deny,
         "Windows AppContainer outbound network grants are not implemented; refusing degraded execution"
@@ -283,6 +295,14 @@ pub fn run(
             if let Some(value) = value {
                 environment_entries.push(format!("{name}={value}"));
             }
+        }
+        for (name, value) in extra_env {
+            environment_entries.retain(|entry| {
+                !entry
+                    .split_once('=')
+                    .is_some_and(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            });
+            environment_entries.push(format!("{name}={value}"));
         }
         environment_entries.sort_by_key(|entry| entry.to_ascii_lowercase());
         let mut environment = Vec::new();

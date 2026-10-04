@@ -282,6 +282,30 @@ fn native_linux_denies_proc_credentials_and_unix_sockets() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires the dedicated native Linux release runner"]
+fn native_linux_allows_workdir_filesystem_mutations() {
+    assert!(oath_sandbox::native_capabilities().available);
+    let dir = tempfile::tempdir().unwrap();
+    let plan = oath_sandbox::SandboxPlan::strict("workdir-writes", dir.path().to_path_buf());
+    // The operations an installer or formatter performs in its working
+    // directory, through whichever syscall forms the libc and runtime pick.
+    let status = run_native_release(
+        &plan,
+        std::path::Path::new("/bin/sh"),
+        &[
+            "-c",
+            "mkdir d && mv d e && rmdir e && echo x > f && chmod 600 f && ln -s f g && ln f h && touch -d @0 f && mv f i && rm g h i",
+        ],
+    );
+    assert!(
+        status.success(),
+        "working-directory mutations must be allowed"
+    );
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the dedicated native Linux release runner"]
 fn native_linux_enforces_child_process_policy() {
     assert!(oath_sandbox::native_capabilities().available);
     let dir = tempfile::tempdir().unwrap();

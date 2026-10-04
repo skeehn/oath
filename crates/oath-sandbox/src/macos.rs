@@ -194,6 +194,18 @@ fn process_group_memory_bytes(process_group: i32, max_processes: u64) -> Result<
 }
 
 pub fn run(plan: &SandboxPlan, program: &std::path::Path, args: &[String]) -> Result<ExitStatus> {
+    run_with_env(plan, program, args, &[])
+}
+
+/// Like [`run`], but also sets `extra_env` for the sandboxed process. The
+/// values are explicit, caller-computed variables (an exec's PATH and `npm_*`
+/// environment), applied after the plan's host allowlist.
+pub fn run_with_env(
+    plan: &SandboxPlan,
+    program: &std::path::Path,
+    args: &[String],
+    extra_env: &[(String, String)],
+) -> Result<ExitStatus> {
     ensure!(
         std::path::Path::new(SANDBOX_EXEC).is_file(),
         "native macOS sandbox unavailable: {SANDBOX_EXEC} is missing; Oath will not silently fall back"
@@ -215,6 +227,9 @@ pub fn run(plan: &SandboxPlan, program: &std::path::Path, args: &[String]) -> Re
         if let Ok(value) = std::env::var(name) {
             command.env(name, value);
         }
+    }
+    for (name, value) in extra_env {
+        command.env(name, value);
     }
     // SAFETY: pre_exec performs only libc process-group and rlimit operations.
     unsafe {

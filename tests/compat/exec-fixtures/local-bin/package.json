@@ -1,0 +1,8 @@
+{
+  "name": "exec-local-bin",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "cowsay": "1.6.0"
+  }
+}

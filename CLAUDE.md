@@ -56,6 +56,8 @@ node scripts/license-check.mjs              # Apache-2.0 declarations
 node scripts/validate-agent-skills.mjs      # .agents/skills frontmatter + evals + required safety markers
 cargo run --locked -p oath-contracts --example generate_contract_examples -- contracts/examples  # then verify clean git diff
 node scripts/compat-behavioral.mjs --execute # npm parity, needs OATH_BIN and npm 11.12.1 on PATH
+OATH_BIN=target/debug/oath node scripts/exec-parity.mjs   # npx vs `oath x` on tests/compat/exec-fixtures.json
+OATH_EXEC_PARITY_ONLY=cowsay-hello,tsc-version OATH_BIN=target/debug/oath node scripts/exec-parity.mjs  # a subset
 (cd website && npm ci && npm run build)      # Vite/React evidence site
 ```
 
@@ -76,7 +78,7 @@ Cargo workspace under `crates/`. Dependency direction is strictly bottom-up; `oa
 | `oath-sandbox` | `SandboxPlan` (versioned) and per-OS backends: Linux bubblewrap + Landlock + seccomp, macOS Seatbelt, Windows AppContainer/Job Objects. `native_capabilities()` reports; `verified_native_capabilities()` proves by running a strict plan |
 | `oath-transparency` | Append-only hash-chained JSONL log at `~/.oath/transparency.log` with Merkle checkpoints |
 | `oath-workspace` | Monorepo detection (`pnpm-workspace.yaml`, `package.json#workspaces`), `workspace:*` specifiers |
-| `oath-cli` | The `oath` binary (clap). `main.rs` is ~5.5k lines holding all subcommands; `exec_assessment.rs`, `publish_assessment.rs`, `approvals.rs`, `package_transfer.rs` hold the decision logic |
+| `oath-cli` | The `oath` binary (clap). `main.rs` is ~5k lines holding most subcommands; `exec.rs` (resolution, exec cache, gate), `exec_spec.rs` (specs, bin rule, `init` mapping), `exec_cache.rs` (`cache npx`), `launch.rs` (shebang launcher, npm env, CI/TTY detection), `exec_assessment.rs`, `publish_assessment.rs`, `approvals.rs`, `package_transfer.rs` hold the decision logic |
 | `oath-registry` | Axum + PostgreSQL private registry service (`oath-registry` binary) with object-store backends, OIDC identity, billing, control plane, signed verdicts |
 
 ### Install pipeline (the part that spans several crates)
@@ -92,6 +94,8 @@ Cargo workspace under `crates/`. Dependency direction is strictly bottom-up; `oa
 `oath exec` and `oath publish` produce signed assessments defined in `oath-contracts`. Both `--json` modes require `--dry-run`. The contract surface is published in `contracts/` (JSON Schemas, `oath-contracts.ts`, OpenAPI, JS/Python/Go verifiers) and regenerated examples live in `contracts/examples/`. Adding a reason code requires synchronized changes to the Rust enum, TypeScript types, schema, examples, and bundle manifest; changing or removing one requires a new schema version. The previous schema version stays available via `--schema-version` for one major release. JSON output modes reserve stdout for exactly one document.
 
 Sandbox mode semantics: `--sandbox-mode auto` must fail closed when the native backend lacks any of filesystem/network/process/resource controls, unless `--allow-degraded-sandbox` is passed, in which case the output records `sandbox_degraded_allowed`. Approvals are bound to the tarball integrity hash, not the package name.
+
+`oath x` semantics (Phase 1): libnpmexec resolution order (project bin, walk-up `.bin`, `~/.oath/global/bin`, spec); local tree used when it satisfies every spec; otherwise the exec cache `~/.oath/cache/_npx/<key>` (npm's sha512 key over sorted specs) is planned with an Arborist `add` request, linked from the store, scanned, and gated. npm's prompt rule applies (prompt only when installing, on a TTY, outside CI, never with `--yes`); serious findings still need a TTY or `--yes`. Oath's exec messages go to stderr; stdout is the program's. Lifecycle scripts of the exec'd package run after the gate under install's trust rules. `--min-release-age` is passed to the planner as npm's `before` cutoff (`PlacementRequest::with_min_release_age`), with excludes handled by wrapping `pacote.manifest` in `arborist-plan.cjs`.
 
 ## Evidence and compatibility assets
 

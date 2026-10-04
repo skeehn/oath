@@ -58,11 +58,22 @@ Windows comparisons still exclude the shim directory because Oath does not yet
 write npm's `cmd-shim` files there. The comparison also requires that neither
 installer rewrote the fixture's `package.json` on a plain install or ci.
 
+`scripts/exec-parity.mjs` is the executable specification for `oath x`
+against `npx`: every case in `tests/compat/exec-fixtures.json` runs with both
+tools in a fresh home directory and must produce the same exit code and the
+same normalized stdout (ANSI stripped, line endings folded, trailing
+whitespace trimmed). The set covers common CLIs with pinned versions, scoped
+and multi-bin packages, `--package` and `--call`, project and locally
+installed bins, directory and remote tarball specs, a warm second run, and
+error exit codes; the git case is reported but optional because it needs a
+reachable git host. CI runs it on Linux, macOS, and Windows.
+
 Known gaps still outside the executed contract (tracked in
-`docs/FULL_REPLACEMENT_ROADMAP.md`): the parity harness runs `install` and `ci`
-with `--ignore-scripts` only; `run`, `exec`, lifecycle scripts, `.npmrc`
-beyond registry and token keys, `package-lock.json` output, and workspace
-filter flags are not yet differentially tested. The optional
+`docs/FULL_REPLACEMENT_ROADMAP.md`): the install parity harness runs
+`install` and `ci` with `--ignore-scripts` only; `run`, lifecycle scripts,
+`.npmrc` beyond registry, token, and `min-release-age` keys,
+`package-lock.json` output, and workspace filter flags are not yet
+differentially tested. The optional
 `OATH_COMPAT_INTEROP=1` probe records whether `npm install` after
 `oath install` leaves the tree unchanged; it is reported, not required, until
 Oath writes `package-lock.json` itself.
