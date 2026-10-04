@@ -33,6 +33,18 @@ test("compareRuns honors the comparison mode", () => {
   assert.equal(compareRuns(c, { status: 0, stdout: "" }, { compare: "status" }, {}).equivalent, false);
 });
 
+test("compareRuns never counts a run that did not finish as parity", () => {
+  const hung = { status: null, stdout: "", error: { code: "ETIMEDOUT", message: "spawnSync node ETIMEDOUT" } };
+  const result = compareRuns(hung, { ...hung }, {}, {});
+  assert.equal(result.completed, false);
+  assert.equal(result.equivalent, false);
+  assert.equal(compareRuns({ status: null, stdout: "" }, { status: null, stdout: "" }, { compare: "status" }, {}).equivalent, false);
+  assert.equal(compareRuns({ status: 0, stdout: "x" }, hung, {}, {}).equivalent, false);
+  const done = compareRuns({ status: 0, stdout: "x" }, { status: 0, stdout: "x" }, {}, {});
+  assert.equal(done.completed, true);
+  assert.equal(done.equivalent, true);
+});
+
 test("the fixture set has at least 25 required cases with unique ids", async () => {
   const contract = JSON.parse(await readFile(new URL("../tests/compat/exec-fixtures.json", import.meta.url), "utf8"));
   const ids = contract.cases.map(c => c.id);

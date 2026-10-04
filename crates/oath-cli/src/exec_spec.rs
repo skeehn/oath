@@ -67,7 +67,8 @@ impl ExecSpec {
             );
         }
         if raw.starts_with("http://") || raw.starts_with("https://") {
-            let kind = if raw.ends_with(".git") || raw.contains(".git#") {
+            let kind = if raw.ends_with(".git") || raw.contains(".git#") || is_hosted_git_http(raw)
+            {
                 SpecKind::Git(raw.to_string())
             } else {
                 SpecKind::Remote(raw.to_string())
@@ -158,6 +159,7 @@ impl ExecSpec {
     }
 }
 
+/// Resolve a directory or tarball spec against `cwd` to an absolute path.
 fn local_spec(raw: &str, path: &str, cwd: &Path) -> Result<ExecSpec> {
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
         oath_core::home_dir()
@@ -205,11 +207,14 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Whether a path names a package tarball by extension.
 fn is_tarball_name(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     name.ends_with(".tgz") || name.ends_with(".tar.gz") || name.ends_with(".tar")
 }
 
+/// Whether a spec is a filesystem path by npm's rules (relative, absolute,
+/// home-relative, or a Windows drive path).
 fn is_path_like(raw: &str) -> bool {
     raw == "."
         || raw == ".."
@@ -223,6 +228,7 @@ fn is_path_like(raw: &str) -> bool {
         || is_windows_drive_path(raw)
 }
 
+/// Whether a spec starts with a Windows drive letter and separator.
 fn is_windows_drive_path(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     bytes.len() >= 3
@@ -231,6 +237,8 @@ fn is_windows_drive_path(raw: &str) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
+/// Whether a spec uses one of npm's explicit git URL schemes or host
+/// prefixes.
 fn is_git_url(raw: &str) -> bool {
     const PREFIXES: [&str; 9] = [
         "git+",
@@ -309,10 +317,31 @@ pub fn validate_package_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// An `http(s)` URL of a repository on a host npm-package-arg knows
+/// (GitHub, GitLab, Bitbucket, Gist, sourcehut), which npm treats as a git
+/// spec even without a `.git` suffix. Tarball downloads on those hosts stay
+/// remote specs, as do bare host or user pages.
+fn is_hosted_git_http(raw: &str) -> bool {
+    let rest = raw.split_once("://").map_or(raw, |(_, rest)| rest);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let path = path.split('#').next().unwrap_or("");
+    let segments = path.split('/').filter(|s| !s.is_empty()).count();
+    let min_segments = if host == "gist.github.com" { 1 } else { 2 };
+    matches!(
+        host,
+        "github.com" | "gitlab.com" | "bitbucket.org" | "gist.github.com" | "git.sr.ht"
+    ) && segments >= min_segments
+        && !is_tarball_name(Path::new(path))
+}
+
+/// A character npm allows in a package name.
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
 }
 
+/// Classify the part after `@` in a registry spec as an exact version, a
+/// semver range, or a dist-tag (`latest` when absent).
 fn classify_registry_spec(spec: &str) -> RegistryKind {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -486,6 +515,33 @@ mod tests {
             parse("https://example.com/pkg-1.0.0.tgz").kind,
             SpecKind::Remote(_)
         ));
+    }
+
+    #[test]
+    fn hosted_https_urls_without_a_git_suffix_are_git_specs() {
+        for raw in [
+            "https://github.com/user/repo",
+            "https://github.com/user/repo#main",
+            "https://www.github.com/user/repo",
+            "https://gitlab.com/group/sub/repo",
+            "https://bitbucket.org/user/repo",
+            "https://gist.github.com/0123456789abcdef",
+            "https://git.sr.ht/~user/repo",
+        ] {
+            let spec = parse(raw);
+            assert!(matches!(spec.kind, SpecKind::Git(_)), "{raw}");
+            assert!(spec.revalidates(), "{raw}");
+        }
+        for raw in [
+            "https://github.com/user/repo/archive/v1.0.0.tar.gz",
+            "https://github.com/user/repo/releases/download/v1/pkg.tgz",
+            "https://github.com/user",
+            "https://example.com/user/repo",
+        ] {
+            let spec = parse(raw);
+            assert!(matches!(spec.kind, SpecKind::Remote(_)), "{raw}");
+            assert!(!spec.revalidates(), "{raw}");
+        }
     }
 
     #[test]

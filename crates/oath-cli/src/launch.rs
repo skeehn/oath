@@ -202,6 +202,7 @@ pub fn parse_shebang(first_line: &str) -> Option<Shebang> {
     })
 }
 
+/// Read and parse the shebang line of `path`, if it has one.
 pub fn read_shebang(path: &Path) -> Option<Shebang> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
@@ -228,11 +229,21 @@ pub struct Launch {
     pub raw_command_line: Option<String>,
 }
 
-/// Quote one token for a `cmd.exe` command line: tokens with whitespace are
-/// wrapped in double quotes, everything else passes through.
+/// Quote one token for a `cmd.exe` command line. A token with whitespace or
+/// a cmd metacharacter (`& | < > ^ ( ) ! "`) is wrapped in double quotes,
+/// inside which cmd interprets none of them, and an embedded quote is
+/// doubled, which the receiving program's argument parser reads as one
+/// literal quote. `%` is the one character cmd expands even inside quotes
+/// when a `cmd /c` line is parsed; there is no escape for it at this layer,
+/// and npm's script shell has the same gap.
 fn cmd_token(token: &str) -> String {
-    if token.is_empty() || token.chars().any(char::is_whitespace) {
-        format!("\"{token}\"")
+    const META: &[char] = &['&', '|', '<', '>', '^', '(', ')', '!', '"'];
+    if token.is_empty()
+        || token
+            .chars()
+            .any(|c| c.is_whitespace() || META.contains(&c))
+    {
+        format!("\"{}\"", token.replace('"', "\"\""))
     } else {
         token.to_string()
     }
@@ -391,6 +402,7 @@ pub fn exec_env(
     env
 }
 
+/// The version string of the Node found on `PATH`, for the user agent.
 fn node_version() -> Option<String> {
     let output = std::process::Command::new("node")
         .arg("--version")
@@ -458,10 +470,16 @@ mod tests {
     }
 
     #[test]
-    fn cmd_tokens_quote_only_whitespace() {
+    fn cmd_tokens_quote_whitespace_and_metacharacters() {
         assert_eq!(cmd_token("--version"), "--version");
+        assert_eq!(cmd_token("https://h/path?x=1"), "https://h/path?x=1");
         assert_eq!(cmd_token("hello world"), "\"hello world\"");
         assert_eq!(cmd_token(""), "\"\"");
+        assert_eq!(cmd_token("https://h/?a=1&b=2"), "\"https://h/?a=1&b=2\"");
+        assert_eq!(cmd_token("a|b"), "\"a|b\"");
+        assert_eq!(cmd_token("^1.0.0"), "\"^1.0.0\"");
+        assert_eq!(cmd_token("(x)"), "\"(x)\"");
+        assert_eq!(cmd_token("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     #[test]

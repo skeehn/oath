@@ -109,16 +109,19 @@ pub struct PackageRecord {
 
 const RECORDS_VERSION: u32 = 1;
 
+/// Path of the entry's `exec-records.json`.
 fn records_path(entry: &Path) -> PathBuf {
     entry.join(".oath").join("exec-records.json")
 }
 
+/// The entry's records, when the file exists and parses.
 fn read_records(entry: &Path) -> Option<ExecRecords> {
     let text = std::fs::read_to_string(records_path(entry)).ok()?;
     let records: ExecRecords = serde_json::from_str(&text).ok()?;
     (records.schema_version == RECORDS_VERSION).then_some(records)
 }
 
+/// Serialize the entry's records to `exec-records.json`.
 fn write_records(entry: &Path, records: &ExecRecords) -> Result<()> {
     let path = records_path(entry);
     std::fs::create_dir_all(path.parent().expect("records path has a parent"))?;
@@ -134,6 +137,7 @@ pub fn recorded_names(entry: &Path) -> Vec<AddedSpec> {
         .unwrap_or_default()
 }
 
+/// Seconds since the Unix epoch.
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -186,6 +190,10 @@ enum Gate {
     Exit(i32),
 }
 
+/// Run `oath x`: resolve the command in libnpmexec's order (project bin,
+/// walk-up `.bin`, global bin, package spec), install into the exec cache
+/// when nothing local satisfies the specs, pass the gate, then launch.
+/// Returns the exit code to report.
 pub async fn run(opts: ExecOptions) -> Result<i32> {
     anyhow::ensure!(
         matches!(opts.schema_version, 2 | 3),
@@ -447,6 +455,8 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
     run_resolved(&ctx, &opts, &args, &bin_dirs, &command_name, needs_network).await
 }
 
+/// The release-age cooldown this run resolves under, as stored in the
+/// entry's records so a later run with a different cooldown re-plans.
 fn cooldown_record(ctx: &ExecContext) -> Option<CooldownRecord> {
     ctx.min_release_age.as_ref().map(|age| CooldownRecord {
         min_age_secs: age.age.as_secs(),
@@ -490,6 +500,7 @@ fn swap_command(
     }
 }
 
+/// The command named by the positional arguments, if any.
 fn command_name_of(args: &[String]) -> Option<&str> {
     args.first()
         .map(String::as_str)
@@ -519,14 +530,21 @@ fn project_bin(prefix: &Path, cmd: &str) -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let file = prefix.join(&path);
+    // Compare canonical paths: `starts_with` is component-wise, so it would
+    // accept a `..` escape or a symlink that leaves the project.
+    let inside = match (std::fs::canonicalize(&file), std::fs::canonicalize(prefix)) {
+        (Ok(real), Ok(root)) => real.is_file() && real.starts_with(&root),
+        _ => false,
+    };
     anyhow::ensure!(
-        file.starts_with(prefix) && file.is_file(),
+        inside,
         "package.json bin \"{cmd}\" points at {} which is not a file inside the project",
         file.display()
     );
     Ok(Some(file))
 }
 
+/// Oath's global bin directory, `~/.oath/global/bin`.
 fn global_bin_dir() -> Option<PathBuf> {
     oath_core::home_dir().map(|home| home.join(".oath").join("global").join("bin"))
 }
@@ -586,6 +604,7 @@ async fn local_tree_match(
     Ok(Some(found))
 }
 
+/// The version a dist-tag of `name` points at right now.
 async fn resolve_tag(name: &str, tag: &str) -> Result<String> {
     let client = RegistryClient::default_client()?;
     let packument = client.fetch_packument(name).await?;
@@ -593,6 +612,7 @@ async fn resolve_tag(name: &str, tag: &str) -> Result<String> {
     Ok(resolved.version.to_string())
 }
 
+/// Parse the `package.json` in `dir`.
 fn read_manifest(dir: &Path) -> Result<serde_json::Value> {
     let path = dir.join("package.json");
     let text = std::fs::read_to_string(&path)
@@ -878,6 +898,8 @@ struct EntryLock {
 }
 
 impl EntryLock {
+    /// Take the entry's `concurrency.lock`, waiting briefly for another run
+    /// to release it and failing when it does not.
     fn acquire(entry: &Path) -> Result<Self> {
         let path = entry.join("concurrency.lock");
         let started = std::time::Instant::now();
@@ -1108,6 +1130,8 @@ struct Assessment {
     sandbox_plan: Option<oath_sandbox::SandboxPlan>,
 }
 
+/// The capabilities the chosen sandbox mode can enforce: the native backend
+/// proves its own, the Node permission model is fixed, and off has none.
 fn sandbox_capabilities(mode: ExecSandboxMode) -> oath_sandbox::BackendCapabilities {
     match mode {
         ExecSandboxMode::Native => oath_sandbox::verified_native_capabilities(),
@@ -1285,6 +1309,7 @@ fn assess(
     })
 }
 
+/// Build the signed `ExecAssessment` document for `--json` and `--json-file`.
 fn verdict_json(
     ctx: &ExecContext,
     opts: &ExecOptions,
@@ -1460,6 +1485,7 @@ fn print_card(
     Ok(())
 }
 
+/// Truncate a card value to `max` bytes with an ellipsis.
 fn shorten(value: &str, max: usize) -> String {
     if value.len() <= max {
         value.to_string()
@@ -1468,6 +1494,7 @@ fn shorten(value: &str, max: usize) -> String {
     }
 }
 
+/// Format a count with thousands separators for the card.
 fn group_thousands(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -1789,6 +1816,8 @@ fn run_lifecycle_scripts(
     Ok(())
 }
 
+/// Whether a path lives under a system prefix the sandbox plan already
+/// grants read access to.
 fn is_system_path(path: &Path) -> bool {
     ["/usr", "/bin", "/lib", "/lib64"]
         .iter()
@@ -2072,18 +2101,23 @@ mod tests {
     #[test]
     fn project_bin_requires_a_file_inside_the_project() {
         let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
         std::fs::write(
-            dir.path().join("package.json"),
-            r#"{"name":"demo","bin":{"hello":"./hello.js","escape":"../outside.js"}}"#,
+            project.join("package.json"),
+            r#"{"name":"demo","bin":{"hello":"./hello.js","escape":"../outside.js","gone":"./missing.js"}}"#,
         )
         .unwrap();
-        std::fs::write(dir.path().join("hello.js"), "").unwrap();
+        std::fs::write(project.join("hello.js"), "").unwrap();
+        // The escape target exists, so only the containment check can refuse it.
+        std::fs::write(dir.path().join("outside.js"), "").unwrap();
         assert_eq!(
-            project_bin(dir.path(), "hello").unwrap(),
-            Some(dir.path().join("./hello.js"))
+            project_bin(&project, "hello").unwrap(),
+            Some(project.join("./hello.js"))
         );
-        assert!(project_bin(dir.path(), "escape").is_err());
-        assert_eq!(project_bin(dir.path(), "missing").unwrap(), None);
+        assert!(project_bin(&project, "escape").is_err());
+        assert!(project_bin(&project, "gone").is_err());
+        assert_eq!(project_bin(&project, "missing").unwrap(), None);
     }
 
     #[test]

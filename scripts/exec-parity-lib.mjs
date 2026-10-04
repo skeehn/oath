@@ -58,16 +58,20 @@ export function oathArgs(testCase) {
 /**
  * Compare two runs. `compare` is "stdout" (exit code and normalized stdout
  * must match) or "status" (only the exit code must match, for output that
- * is inherently different such as error text on stdout).
+ * is inherently different such as error text on stdout). A run that timed
+ * out or failed to start has no exit code (`status: null`, or `error` set),
+ * and two of those are not evidence of parity: the case is not equivalent.
  */
 export function compareRuns(npx, oath, testCase, context) {
   const compare = testCase.compare ?? "stdout";
   const npxStdout = normalizeOutput(npx.stdout, context);
   const oathStdout = normalizeOutput(oath.stdout, context);
-  const statusEqual = npx.status === oath.status;
+  const completed = [npx, oath].every(run => Number.isInteger(run.status) && !run.error);
+  const statusEqual = completed && npx.status === oath.status;
   const stdoutEqual = compare === "status" || npxStdout === oathStdout;
   return {
     equivalent: statusEqual && stdoutEqual,
+    completed,
     status_equal: statusEqual,
     stdout_equal: stdoutEqual,
     npx_stdout: npxStdout,

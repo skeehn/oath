@@ -51,6 +51,7 @@ impl NpxCache {
         Self { root }
     }
 
+    /// The cache directory holding one subdirectory per entry key.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -76,6 +77,7 @@ impl NpxCache {
             .collect()
     }
 
+    /// The directory of the entry with this key.
     pub fn entry_dir(&self, key: &str) -> PathBuf {
         self.root.join(key)
     }
@@ -266,6 +268,7 @@ fn installed_id(entry: &CacheEntry, package: &str) -> Option<String> {
     Some(format!("{name}@{version}"))
 }
 
+/// The version of `name` linked at the top level of an entry.
 fn installed_version(entry: &Path, name: &str) -> Option<String> {
     let manifest = entry.join("node_modules").join(name).join("package.json");
     let value: serde_json::Value =
