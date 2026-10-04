@@ -494,7 +494,8 @@ mod tests {
         std::fs::create_dir(dir.path().join("pkg")).unwrap();
         std::fs::write(dir.path().join("pkg.tgz"), b"").unwrap();
         let spec = ExecSpec::parse("./pkg", dir.path()).unwrap();
-        let canonical = std::fs::canonicalize(dir.path().join("pkg")).unwrap();
+        let canonical =
+            without_verbatim_prefix(std::fs::canonicalize(dir.path().join("pkg")).unwrap());
         assert_eq!(spec.kind, SpecKind::Directory(canonical.clone()));
         assert_eq!(spec.cache_component(), canonical.display().to_string());
         let spec = ExecSpec::parse("file:pkg.tgz", dir.path()).unwrap();
