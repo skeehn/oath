@@ -92,7 +92,12 @@ echo "==> release smoke install"
   node -e 'const isNumber = require("is-number"); if (!isNumber(7)) process.exit(1)'
   HOME="$SMOKE_HOME" "$BIN" verify
 
-  STORE_PACKAGE_JSON="$(find "$SMOKE_HOME/.oath/store" -path "*is-number*package.json" -print -quit)"
+  # Tamper the store copy the project actually links. The store may also hold
+  # an is-number version that a removed package once needed; that copy is no
+  # longer in the lock, so verify is right not to flag it.
+  IS_NUMBER_VERSION="$(node -p "require('./node_modules/is-number/package.json').version")"
+  STORE_PACKAGE_JSON="$(find "$SMOKE_HOME/.oath/store" -path "*/is-number/$IS_NUMBER_VERSION/*package.json" -print -quit)"
+  test -n "$STORE_PACKAGE_JSON"
   cp "$STORE_PACKAGE_JSON" "$STORE_PACKAGE_JSON.bak"
   printf '\n// tamper\n' >> "$STORE_PACKAGE_JSON"
   if HOME="$SMOKE_HOME" "$BIN" verify; then
