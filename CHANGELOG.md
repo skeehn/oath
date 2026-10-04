@@ -48,7 +48,9 @@ All notable changes to oath are documented here. Format follows
   `NODE_EXTRA_CA_CERTS`, so TLS-inspecting proxies work as they do with npm.
 - README no longer claims baseline commands run without Node.
 - `oath exec <pkg> --flag` passes flags after the package name to the binary,
-  as npx does, instead of rejecting them.
+  as npx does, instead of rejecting them. Oath's own exec flags (`--dry-run`,
+  `--json`, `--sandbox-mode`, ...) must now come before the package name;
+  `oath exec pkg --json` hands `--json` to the package.
 - Piping output (`oath graph | head`) no longer panics on a closed pipe.
 - Install scripts of `file:` packages linked from the project root run on
   every install under the same trust policy, matching npm's rebuild of

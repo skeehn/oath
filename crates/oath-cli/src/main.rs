@@ -332,16 +332,25 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Rust ignores SIGPIPE, so `oath graph | head` would panic on the first
     // write after the reader exits. Restore the default so the process exits
-    // quietly like every other CLI.
+    // quietly like every other CLI. This runs before the Tokio runtime (and
+    // its worker threads) exists.
     #[cfg(unix)]
-    // SAFETY: setting a signal disposition before any thread is spawned.
+    // SAFETY: `signal` only changes the process-wide disposition; no other
+    // thread has been created yet.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .without_time()
@@ -665,8 +674,12 @@ async fn cmd_install(
         // this add request (save-prefix ranges, npm: aliases, git shortcuts,
         // relative file: paths). Apply it before anything derives from the
         // manifest.
-        if let Some(root_manifest) = &plan.root_manifest {
-            root_manifest.apply_to(&mut manifest_doc.value);
+        match &plan.root_manifest {
+            Some(root_manifest) => root_manifest.apply_to(&mut manifest_doc.value),
+            None => anyhow::ensure!(
+                packages.is_empty(),
+                "planner did not report the package.json changes for this add request; refusing to install without recording the dependency"
+            ),
         }
         Some(plan)
     } else {
