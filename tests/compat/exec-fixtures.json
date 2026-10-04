@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "npx (npm 11) versus `oath x`: each case runs in a fresh HOME for both tools and must produce the same exit code and the same normalized stdout. Oath prints its own messages on stderr. Versions are pinned so the comparison is stable; `repeat` runs a case twice to cover the warm cache; `optional` cases are reported but do not gate.",
+  "description": "npx (npm 11) versus `oath x`: each case runs in a fresh HOME for both tools and must produce the same exit code and the same normalized stdout. Oath prints its own messages on stderr. Versions are pinned so the comparison is stable; `repeat` runs a case twice to cover the warm cache; `optional` cases are reported but do not gate. Arguments avoid cmd.exe metacharacters such as `^`, which npm's script-shell layer strips on Windows and Oath does not.",
   "cases": [
     { "id": "cowsay-hello", "args": ["cowsay@1.6.0", "hello", "world"] },
     { "id": "cowsay-warm-cache", "args": ["cowsay@1.6.0", "warm"], "repeat": 2 },
@@ -14,8 +14,8 @@
     { "id": "vite-version", "args": ["vite@7.1.5", "--version"] },
     { "id": "esbuild-version", "args": ["esbuild@0.25.12", "--version"] },
     { "id": "biome-scoped-version", "args": ["@biomejs/biome@2.3.4", "--version"] },
-    { "id": "semver-range-match", "args": ["semver@7.7.2", "-r", "^1.0.0", "1.2.3"] },
-    { "id": "semver-no-match-exit-code", "args": ["-p", "semver@7.7.2", "semver", "-r", "^2.0.0", "1.2.3"] },
+    { "id": "semver-range-match", "args": ["semver@7.7.2", "-r", "1.x", "1.2.3"] },
+    { "id": "semver-no-match-exit-code", "args": ["-p", "semver@7.7.2", "semver", "-r", "2.x", "1.2.3"] },
     { "id": "mkdirp-version", "args": ["mkdirp@3.0.1", "--version"] },
     { "id": "json5-version", "args": ["json5@2.2.3", "--version"] },
     { "id": "tsx-version", "args": ["tsx@4.20.6", "--version"] },

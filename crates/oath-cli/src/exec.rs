@@ -1889,6 +1889,10 @@ async fn spawn(
             launch::spawn_plain(launch, &ctx.cwd, &env)?
         }
         ExecSandboxMode::Native => {
+            anyhow::ensure!(
+                launch.raw_command_line.is_none(),
+                "the Windows native sandbox cannot run shell scripts or .cmd shims; run `{script}` without --sandbox-mode native"
+            );
             let install_dir = bin_dirs
                 .first()
                 .and_then(|bin| bin.parent())
@@ -1944,6 +1948,7 @@ async fn spawn(
             let launch = Launch {
                 program: node.clone(),
                 args,
+                raw_command_line: None,
             };
             launch::spawn_plain(&launch, &ctx.cwd, &env)?
         }

@@ -221,6 +221,21 @@ pub fn read_shebang(path: &Path) -> Option<Shebang> {
 pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Windows only: the complete command line to hand `cmd.exe` verbatim.
+    /// `cmd /s /c` expects `"<script>"` as typed, not the per-argument MSVC
+    /// quoting `std::process::Command` applies, which npm avoids the same
+    /// way (`windowsVerbatimArguments`). When set, `args` is empty.
+    pub raw_command_line: Option<String>,
+}
+
+/// Quote one token for a `cmd.exe` command line: tokens with whitespace are
+/// wrapped in double quotes, everything else passes through.
+fn cmd_token(token: &str) -> String {
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        format!("\"{token}\"")
+    } else {
+        token.to_string()
+    }
 }
 
 /// Decide how to execute `file` with `args`: via its shebang interpreter
@@ -247,12 +262,15 @@ pub fn plan_launch(file: &Path, args: &[String]) -> Result<Launch> {
         .unwrap_or_default();
     if cfg!(windows) && matches!(ext.as_str(), "cmd" | "bat") {
         let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
-        let mut launch_args = vec!["/d".to_string(), "/s".to_string(), "/c".to_string()];
-        launch_args.push(invoked.display().to_string());
-        launch_args.extend(args.iter().cloned());
+        let line = std::iter::once(invoked.display().to_string())
+            .chain(args.iter().cloned())
+            .map(|token| cmd_token(&token))
+            .collect::<Vec<_>>()
+            .join(" ");
         return Ok(Launch {
             program: PathBuf::from(comspec),
-            args: launch_args,
+            args: Vec::new(),
+            raw_command_line: Some(format!("/d /s /c \"{line}\"")),
         });
     }
     if let Some(shebang) = read_shebang(&target) {
@@ -263,6 +281,7 @@ pub fn plan_launch(file: &Path, args: &[String]) -> Result<Launch> {
         return Ok(Launch {
             program,
             args: launch_args,
+            raw_command_line: None,
         });
     }
     if matches!(ext.as_str(), "js" | "cjs" | "mjs") {
@@ -271,11 +290,13 @@ pub fn plan_launch(file: &Path, args: &[String]) -> Result<Launch> {
         return Ok(Launch {
             program: active_node_executable()?,
             args: launch_args,
+            raw_command_line: None,
         });
     }
     Ok(Launch {
         program: invoked,
         args: args.to_vec(),
+        raw_command_line: None,
     })
 }
 
@@ -303,12 +324,14 @@ pub fn shell_launch(script: &str) -> Launch {
         let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
         Launch {
             program: PathBuf::from(comspec),
-            args: vec!["/d".into(), "/s".into(), "/c".into(), script.to_string()],
+            args: Vec::new(),
+            raw_command_line: Some(format!("/d /s /c \"{script}\"")),
         }
     } else {
         Launch {
             program: PathBuf::from("sh"),
             args: vec!["-c".into(), script.to_string()],
+            raw_command_line: None,
         }
     }
 }
@@ -385,7 +408,16 @@ pub fn spawn_plain(
     env: &[(String, String)],
 ) -> Result<std::process::ExitStatus> {
     let mut command = std::process::Command::new(&launch.program);
-    command.args(&launch.args).current_dir(cwd);
+    command.current_dir(cwd);
+    #[cfg(windows)]
+    if let Some(line) = &launch.raw_command_line {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(line);
+    } else {
+        command.args(&launch.args);
+    }
+    #[cfg(not(windows))]
+    command.args(&launch.args);
     for (name, value) in env {
         command.env(name, value);
     }
@@ -423,6 +455,13 @@ mod tests {
         );
         assert_eq!(parse_shebang("#!"), None);
         assert_eq!(parse_shebang("console.log(1)"), None);
+    }
+
+    #[test]
+    fn cmd_tokens_quote_only_whitespace() {
+        assert_eq!(cmd_token("--version"), "--version");
+        assert_eq!(cmd_token("hello world"), "\"hello world\"");
+        assert_eq!(cmd_token(""), "\"\"");
     }
 
     #[test]
