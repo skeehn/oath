@@ -95,6 +95,10 @@ Sandbox mode semantics: `--sandbox-mode auto` must fail closed when the native b
 - `scripts/*.test.mjs` are run with `node --test`.
 - `.agents/skills/` contains agent skills whose required safety markers are enforced by `scripts/validate-agent-skills.mjs`; keep those phrases if you edit the skills.
 
+## Roadmap and research
+
+`docs/FULL_REPLACEMENT_ROADMAP.md` is the gap analysis and phased plan for reaching npm/npx/Bun parity, with work-item IDs. `docs/research/oath-cli-inventory.md` is a `file:line` inventory of what every subcommand does today, including known bugs; check it before changing CLI behavior.
+
 ## Conventions
 
 - PR template requires fmt, clippy, test checkboxes and a "Security Notes" section; code touching tarball extraction, linking, script execution, registry auth, installer checksums, or release workflows should include a short threat model in the PR description.
