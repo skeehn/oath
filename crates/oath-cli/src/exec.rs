@@ -830,10 +830,14 @@ async fn install_entry(
             summary.bytes / 1024
         );
     }
+    // The linker compares canonical paths; on Windows those carry the `\\?\`
+    // prefix the spec dropped for the planner, so canonicalize again here.
     let external: HashSet<PathBuf> = specs
         .iter()
         .filter_map(|spec| match &spec.kind {
-            SpecKind::Directory(path) => Some(path.clone()),
+            SpecKind::Directory(path) => {
+                Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            }
             _ => None,
         })
         .collect();
