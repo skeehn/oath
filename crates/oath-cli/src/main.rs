@@ -1282,7 +1282,6 @@ async fn cmd_ci_from_npm_lock(
     start: Instant,
 ) -> Result<()> {
     let npm_lock_path = cwd.join("package-lock.json");
-    let imported = oath_resolve::import_npm_lockfile(&npm_lock_path)?;
     verify_npm_lock_matches_manifest(&npm_lock_path, deps, dev_deps)?;
 
     let project_name = pkg
@@ -1303,13 +1302,10 @@ async fn cmd_ci_from_npm_lock(
         ArboristPlanner::plan(cwd)?
     };
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    let mut graph = placement_plan.to_dep_graph()?;
-    let expected = Lockfile::from_graph(&imported, &project_name, &project_version);
-    let planned =
-        Lockfile::from_graph_with_manifest(&graph, &project_name, &project_version, deps, dev_deps);
-    if !lockfiles_match_for_frozen(&expected, &planned) {
+    if !plan_matches_npm_lock(&placement_plan, &npm_lock_path)? {
         anyhow::bail!("placement plan does not match package-lock.json, run oath install first");
     }
+    let mut graph = placement_plan.to_dep_graph()?;
 
     let store = Arc::new(ContentStore::default_store()?);
     let client = Arc::new(RegistryClient::default_client()?);
@@ -1351,6 +1347,68 @@ async fn cmd_ci_from_npm_lock(
     }
 
     Ok(())
+}
+
+/// Verify an Arborist placement plan reproduces exactly the package set locked
+/// in package-lock.json (location -> name@version), for the current platform.
+/// This is the `oath ci` frozen check when npm's lockfile is the source of
+/// truth.
+fn plan_matches_npm_lock(plan: &PlacementPlan, npm_lock_path: &std::path::Path) -> Result<bool> {
+    use std::collections::HashSet;
+    let data =
+        std::fs::read_to_string(npm_lock_path).context("failed to read package-lock.json")?;
+    let root: serde_json::Value =
+        serde_json::from_str(&data).context("failed to parse package-lock.json")?;
+    let packages = root
+        .get("packages")
+        .and_then(serde_json::Value::as_object)
+        .context("package-lock.json has no packages map")?;
+
+    // Expected set from the lockfile, filtered to this platform like the
+    // importer does.
+    let mut expected: HashSet<(String, String)> = HashSet::new();
+    for (path, entry) in packages {
+        if path.is_empty() {
+            continue;
+        }
+        let entry = match entry.as_object() {
+            Some(e) => e,
+            None => continue,
+        };
+        if entry
+            .get("link")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !oath_resolve::import::platform_matches(entry) {
+            continue;
+        }
+        let version = match entry.get("version").and_then(serde_json::Value::as_str) {
+            Some(v) => v,
+            None => continue,
+        };
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| oath_resolve::import::name_from_path(path));
+        expected.insert((path.clone(), format!("{name}@{version}")));
+    }
+
+    // Actual set from the plan.
+    let mut actual: HashSet<(String, String)> = HashSet::new();
+    for node in &plan.nodes {
+        if node.link {
+            continue;
+        }
+        actual.insert((
+            node.location.clone(),
+            format!("{}@{}", node.name, node.version),
+        ));
+    }
+
+    Ok(expected == actual)
 }
 
 /// Verify package.json's dependency ranges are in sync with the root entry of
