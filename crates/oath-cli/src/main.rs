@@ -206,6 +206,9 @@ enum Commands {
         /// Fail if lockfile is missing or would be changed (for CI)
         #[arg(long, alias = "ci")]
         frozen_lockfile: bool,
+        /// Generate/update package-lock.json without installing node_modules (npm-compatible)
+        #[arg(long, alias = "lockfile-only")]
+        package_lock_only: bool,
     },
     /// Clean install from the lockfile (like `npm ci`): fail if it is missing or would change
     Ci,
@@ -443,6 +446,7 @@ async fn async_main() -> Result<()> {
             min_age,
             global,
             frozen_lockfile,
+            package_lock_only,
         } => {
             cmd_install(
                 packages,
@@ -455,6 +459,7 @@ async fn async_main() -> Result<()> {
                 global,
                 frozen_lockfile,
                 min_age,
+                package_lock_only,
             )
             .await?;
         }
@@ -681,6 +686,7 @@ async fn cmd_install(
     global: bool,
     frozen_lockfile: bool,
     min_age: Option<String>,
+    package_lock_only: bool,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -709,7 +715,15 @@ async fn cmd_install(
             for pkg in &ws.packages {
                 println!("  - {} ({})", pkg.name, pkg.path.display());
             }
-            return cmd_install_workspace(ws, dry_run, run_audit, yes_flag, run_scripts).await;
+            return cmd_install_workspace(
+                ws,
+                dry_run,
+                run_audit,
+                yes_flag,
+                run_scripts,
+                package_lock_only,
+            )
+            .await;
         }
         // If specific packages are listed, fall through to normal install
     }
@@ -719,10 +733,13 @@ async fn cmd_install(
     // L-02: fast no-op path. If package-lock.json matches the hidden lockfile
     // in node_modules, the tree is already installed — skip planning entirely.
     // This is how npm/Bun achieve millisecond no-op installs.
+    // L-03: --package-lock-only always regenerates the lockfile, even if it
+    // would be a no-op (the user explicitly asked for a fresh lockfile).
     if packages.is_empty()
         && workspace.is_none()
         && !dry_run
         && !frozen_lockfile
+        && !package_lock_only
         && is_noop_install(&cwd)
     {
         println!("  up to date");
@@ -1087,7 +1104,18 @@ async fn cmd_install(
     let cwd = std::env::current_dir()?;
     let linker = Linker::new((*store_ref).clone())
         .with_external_link_targets(external_link_targets(&cwd, &manifest_doc.value, None));
-    let link_result = if let Some(plan) = placement_plan.as_ref() {
+    // L-03: --package-lock-only skips node_modules entirely; just write the lockfile.
+    let link_result = if package_lock_only {
+        println!("  lockfile only, skipping node_modules");
+        // Dummy result; linking is skipped.
+        oath_store::linker::LinkResult {
+            linked: 0,
+            symlinks: 0,
+            nested: 0,
+            bins: 0,
+            missing: 0,
+        }
+    } else if let Some(plan) = placement_plan.as_ref() {
         linker.link_placement_plan(plan, &cwd)?
     } else {
         linker.link_all(&graph, &cwd)?
@@ -1136,7 +1164,10 @@ async fn cmd_install(
                     .collect(),
             };
             write_package_lock(std::path::Path::new("."), plan, &graph, root)?;
-            write_hidden_lockfile(&cwd)?;
+            // L-02: hidden lockfile only when node_modules was actually installed.
+            if !package_lock_only {
+                write_hidden_lockfile(&cwd)?;
+            }
         }
     }
 
@@ -1717,6 +1748,7 @@ async fn cmd_install_workspace(
     run_audit: bool,
     _yes_flag: bool,
     _run_scripts: bool,
+    package_lock_only: bool,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -1794,14 +1826,28 @@ async fn cmd_install_workspace(
         .unwrap_or_default();
     let linker = Linker::new((*store_ref).clone())
         .with_external_link_targets(external_link_targets(&ws.root, &root_manifest, Some(ws)));
-    let link_result = linker.link_placement_plan(&placement_plan, &ws.root)?;
+    // L-03: --package-lock-only skips node_modules entirely.
+    let link_result = if package_lock_only {
+        println!("  lockfile only, skipping node_modules");
+        oath_store::linker::LinkResult {
+            linked: 0,
+            symlinks: 0,
+            nested: 0,
+            bins: 0,
+            missing: 0,
+        }
+    } else {
+        linker.link_placement_plan(&placement_plan, &ws.root)?
+    };
     placement_plan.write(&ws.root.join(".oath").join("placement-plan.json"))?;
     let link_time = link_start.elapsed();
-    println!(
-        "  linked {} packages in {:.1}s",
-        link_result.linked,
-        link_time.as_secs_f64()
-    );
+    if !package_lock_only {
+        println!(
+            "  linked {} packages in {:.1}s",
+            link_result.linked,
+            link_time.as_secs_f64()
+        );
+    }
 
     let workspace_link_count = placement_plan.nodes.iter().filter(|node| node.link).count();
     if workspace_link_count > 0 {
@@ -1844,7 +1890,10 @@ async fn cmd_install_workspace(
             peer_dependencies: std::collections::BTreeMap::new(),
         };
         write_package_lock(&ws.root, &placement_plan, &graph, root)?;
-        write_hidden_lockfile(&ws.root)?;
+        // L-02: hidden lockfile only when node_modules was actually installed.
+        if !package_lock_only {
+            write_hidden_lockfile(&ws.root)?;
+        }
     }
 
     // -- Peer dependency warnings ---------------------------------------------
@@ -2097,6 +2146,7 @@ async fn cmd_add(package: &str, dev: bool, yes: bool) -> Result<()> {
         false,
         false,
         None,
+        false,
     )
     .await
 }
