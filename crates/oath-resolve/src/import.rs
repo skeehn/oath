@@ -13,16 +13,81 @@ use std::path::Path;
 
 use crate::graph::{DepGraph, DepNode, PeerReport};
 
-/// Parse a `package-lock.json` (npm lockfileVersion 2 or 3) into a DepGraph.
+/// Convert a lockfileVersion 1 `dependencies` tree into a `packages` map.
+///
+/// v1 nests dependencies (`dependencies.foo.dependencies.bar`); v2/v3 flattens
+/// them into paths (`node_modules/foo`, `node_modules/foo/node_modules/bar`).
+/// This walks the tree depth-first, building the flat map npm itself produces
+/// on upgrade.
+fn convert_v1_to_packages(mut root: Value) -> Result<Value> {
+    let mut packages = Map::new();
+    // Root entry: v1 has no packages[""], synthesize it from name/version.
+    let mut root_entry = Map::new();
+    if let Some(name) = root.get("name").cloned() {
+        root_entry.insert("name".to_string(), name);
+    }
+    if let Some(version) = root.get("version").cloned() {
+        root_entry.insert("version".to_string(), version);
+    }
+    packages.insert(String::new(), Value::Object(root_entry));
+
+    if let Some(deps) = root.get("dependencies").and_then(Value::as_object).cloned() {
+        convert_v1_deps(&deps, "node_modules", &mut packages);
+    }
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert("packages".to_string(), Value::Object(packages));
+        obj.insert("lockfileVersion".to_string(), Value::from(3));
+    }
+    Ok(root)
+}
+
+fn convert_v1_deps(deps: &Map<String, Value>, prefix: &str, packages: &mut Map<String, Value>) {
+    for (name, entry) in deps {
+        let path = format!("{prefix}/{name}");
+        if let Some(entry_obj) = entry.as_object() {
+            let mut flat = entry_obj.clone();
+            // Nested dependencies become their own packages entries; synthesize
+            // the dependency edge (v1 nests the objects directly, no ranges).
+            if let Some(nested) = flat.remove("dependencies")
+                && let Some(nested_obj) = nested.as_object()
+            {
+                let mut synth = Map::new();
+                for (dep_name, dep_entry) in nested_obj {
+                    if let Some(v) = dep_entry.get("version").and_then(Value::as_str) {
+                        synth.insert(dep_name.clone(), Value::String(v.to_string()));
+                    }
+                }
+                if !synth.is_empty() {
+                    flat.insert("dependencies".to_string(), Value::Object(synth));
+                }
+                convert_v1_deps(nested_obj, &format!("{path}/node_modules"), packages);
+            }
+            // v1 `bundled: true` means the dep was bundled; keep the flag.
+            packages.insert(path, Value::Object(flat));
+        }
+    }
+}
+
+/// Parse a `package-lock.json` (npm lockfileVersion 1, 2 or 3) into a DepGraph.
 pub fn import_npm_lockfile(path: &Path) -> Result<DepGraph> {
     let data =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let root: Value =
+    let mut root: Value =
         serde_json::from_str(&data).with_context(|| format!("parsing {}", path.display()))?;
 
+    // lockfileVersion 1 uses a nested `dependencies` tree instead of the flat
+    // `packages` map; convert it in memory so the rest of the importer sees
+    // a uniform shape (npm itself upgrades v1 on read).
+    let version = root
+        .get("lockfileVersion")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    if version == 1 {
+        root = convert_v1_to_packages(root)?;
+    }
+
     let packages = root.get("packages").and_then(Value::as_object).context(
-        "package-lock.json has no `packages` map (lockfileVersion 1 is unsupported; \
-             run `npm install` once with npm 7+ to upgrade it)",
+        "package-lock.json has no `packages` map (run `npm install` once with npm 7+ to upgrade it)",
     )?;
 
     // First pass: build path -> key and the node skeletons.
@@ -327,5 +392,34 @@ mod tests {
         let g = import_npm_lockfile(&p).unwrap();
         assert!(g.nodes.contains_key("tool@1.0.0"));
         assert!(!g.nodes.contains_key("@tool/bin-foreign@1.0.0"));
+    }
+
+    #[test]
+    fn imports_lockfile_v1() {
+        // v1 nests dependencies; the importer flattens them like npm does.
+        let lock = serde_json::json!({
+            "name": "p", "version": "1.0.0", "lockfileVersion": 1,
+            "dependencies": {
+                "a": {
+                    "version": "1.0.0",
+                    "resolved": "https://r/a/-/a-1.0.0.tgz",
+                    "dependencies": {
+                        "b": {
+                            "version": "2.0.0",
+                            "resolved": "https://r/b/-/b-2.0.0.tgz"
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package-lock.json");
+        std::fs::write(&p, serde_json::to_string(&lock).unwrap()).unwrap();
+        let g = import_npm_lockfile(&p).unwrap();
+        assert!(g.nodes.contains_key("a@1.0.0"));
+        assert!(g.nodes.contains_key("b@2.0.0"));
+        // b is nested under a, not hoisted.
+        let a = &g.nodes["a@1.0.0"];
+        assert_eq!(a.dependencies.get("b"), Some(&"b@2.0.0".to_string()));
     }
 }
