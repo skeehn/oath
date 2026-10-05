@@ -237,6 +237,9 @@ pub struct PlacementRequest {
     pub update: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_type: Option<String>,
+    /// Dependency types to omit (npm-compatible --omit flag): e.g. ["dev", "optional"].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omit: Vec<String>,
     /// npm's `before` cutoff as an RFC 3339 timestamp: only versions published
     /// at or before this instant are eligible. `min-release-age` is expressed
     /// as `now - age`, exactly as npm's config flattening does.

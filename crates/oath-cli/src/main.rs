@@ -878,10 +878,23 @@ async fn cmd_install(
 
     let placement_plan: Option<PlacementPlan> = if use_arborist {
         println!("oath: planning npm-compatible layout with Arborist...");
+        // Build omit list for Arborist (npm-compatible).
+        let mut omit_list = omit.clone();
+        if production && !omit_list.iter().any(|o| o == "dev") {
+            omit_list.push("dev".to_string());
+        }
         let request = if packages.is_empty() {
-            PlacementRequest::default()
+            PlacementRequest {
+                omit: omit_list,
+                ..Default::default()
+            }
         } else {
-            PlacementRequest::add(packages.clone(), dev)
+            PlacementRequest {
+                add: packages.clone(),
+                save_type: dev.then(|| "dev".to_string()),
+                omit: omit_list,
+                ..Default::default()
+            }
         };
         let mut plan = ArboristPlanner::plan_with(&cwd, &request)?;
         hydrate_missing_registry_metadata(&mut plan).await?;
@@ -908,20 +921,8 @@ async fn cmd_install(
     };
 
     let deps = extract_deps(&manifest_doc.value, "dependencies");
-    let mut dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
-    let mut optional_deps = extract_deps(&manifest_doc.value, "optionalDependencies");
-    // --omit and --production (npm-compatible): filter out omitted dep types.
-    // --production is shorthand for --omit=dev.
-    let omit_dev = production || omit.iter().any(|o| o == "dev" || o == "development");
-    let omit_optional = omit.iter().any(|o| o == "optional");
-    if omit_dev {
-        dev_deps.clear();
-        println!("  omitting devDependencies (--omit=dev)");
-    }
-    if omit_optional {
-        optional_deps.clear();
-        println!("  omitting optionalDependencies (--omit=optional)");
-    }
+    let dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
+    let _optional_deps = extract_deps(&manifest_doc.value, "optionalDependencies");
     let trusted_deps: HashSet<String> = manifest_doc
         .value
         .get("trustedDependencies")
@@ -2244,6 +2245,9 @@ async fn cmd_add_multi(
     save_exact: bool,
     save_peer: bool,
 ) -> Result<()> {
+    if packages.is_empty() {
+        anyhow::bail!("oath add requires at least one package");
+    }
     cmd_install(
         packages.to_vec(),
         dev,
