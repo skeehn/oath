@@ -1268,6 +1268,127 @@ async fn cmd_install(
     Ok(())
 }
 
+/// `oath ci` when `package-lock.json` is the source of truth (L-01).
+///
+/// npm's lockfile drives the install: we import it, verify the manifest is in
+/// sync with it (as `npm ci` does), plan through Arborist, and verify the plan
+/// reproduces the locked set. `oath-lock.json` is written afterwards as
+/// derived Oath evidence, not as the authority.
+async fn cmd_ci_from_npm_lock(
+    cwd: &std::path::Path,
+    pkg: &serde_json::Value,
+    deps: &HashMap<String, String>,
+    dev_deps: &HashMap<String, String>,
+    start: Instant,
+) -> Result<()> {
+    let npm_lock_path = cwd.join("package-lock.json");
+    let imported = oath_resolve::import_npm_lockfile(&npm_lock_path)?;
+    verify_npm_lock_matches_manifest(&npm_lock_path, deps, dev_deps)?;
+
+    let project_name = pkg
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("project")
+        .to_string();
+    let project_version = pkg
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0.0.0")
+        .to_string();
+
+    let plan_path = cwd.join(".oath").join("placement-plan.json");
+    let mut placement_plan = if plan_path.exists() {
+        PlacementPlan::read(&plan_path)?
+    } else {
+        ArboristPlanner::plan(cwd)?
+    };
+    hydrate_missing_registry_metadata(&mut placement_plan).await?;
+    let mut graph = placement_plan.to_dep_graph()?;
+    let expected = Lockfile::from_graph(&imported, &project_name, &project_version);
+    let planned =
+        Lockfile::from_graph_with_manifest(&graph, &project_name, &project_version, deps, dev_deps);
+    if !lockfiles_match_for_frozen(&expected, &planned) {
+        anyhow::bail!("placement plan does not match package-lock.json, run oath install first");
+    }
+
+    let store = Arc::new(ContentStore::default_store()?);
+    let client = Arc::new(RegistryClient::default_client()?);
+    let (download_summary, cached) =
+        download_and_prune(&mut placement_plan, &mut graph, &store, Arc::clone(&client)).await?;
+    if download_summary.downloaded > 0 {
+        println!(
+            "  downloaded {} new ({})",
+            download_summary.downloaded,
+            format_bytes(download_summary.bytes)
+        );
+    }
+    if cached > 0 {
+        println!("  {} already cached", cached);
+    }
+
+    let linker = Linker::new((*store).clone())
+        .with_external_link_targets(external_link_targets(cwd, pkg, None));
+    let link_result = linker.link_placement_plan_clean(&placement_plan, cwd)?;
+    placement_plan.write(&plan_path)?;
+    println!("  linked {} packages", link_result.linked);
+
+    // Oath evidence, derived — the authority remains package-lock.json.
+    let evidence =
+        Lockfile::from_graph_with_manifest(&graph, &project_name, &project_version, deps, dev_deps);
+    evidence.write(&cwd.join("oath-lock.json"))?;
+
+    let total_time = start.elapsed();
+    println!("  done in {:.1}s", total_time.as_secs_f64());
+
+    let project_path = cwd.to_string_lossy().to_string();
+    let pkg_entries: Vec<(String, String, Option<String>)> = graph
+        .nodes
+        .values()
+        .map(|n| (n.name.clone(), n.version.clone(), n.integrity.clone()))
+        .collect();
+    if let Ok(logger) = oath_transparency::TransparencyLogger::default_logger() {
+        let _ = logger.log(&project_path, &pkg_entries, total_time.as_millis() as u64);
+    }
+
+    Ok(())
+}
+
+/// Verify package.json's dependency ranges are in sync with the root entry of
+/// package-lock.json, mirroring `npm ci`'s "lock file out of sync" check.
+fn verify_npm_lock_matches_manifest(
+    npm_lock_path: &std::path::Path,
+    deps: &HashMap<String, String>,
+    dev_deps: &HashMap<String, String>,
+) -> Result<()> {
+    let data =
+        std::fs::read_to_string(npm_lock_path).context("failed to read package-lock.json")?;
+    let root: serde_json::Value =
+        serde_json::from_str(&data).context("failed to parse package-lock.json")?;
+    let root_entry = root
+        .get("packages")
+        .and_then(|p| p.get(""))
+        .and_then(serde_json::Value::as_object)
+        .context("package-lock.json has no root packages entry")?;
+    for (section, expected) in [("dependencies", deps), ("devDependencies", dev_deps)] {
+        let locked: HashMap<String, String> = root_entry
+            .get(section)
+            .and_then(serde_json::Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if locked != *expected {
+            anyhow::bail!(
+                "package.json does not match package-lock.json ({} out of sync), run oath install first",
+                section
+            );
+        }
+    }
+    Ok(())
+}
+
 // ---- CI ---------------------------------------------------------------------
 
 async fn cmd_ci() -> Result<()> {
@@ -1282,7 +1403,12 @@ async fn cmd_ci() -> Result<()> {
         .map(|ws| ws.root.clone())
         .unwrap_or_else(|| invoked_from.clone());
     let lock_path = cwd.join("oath-lock.json");
-    if !lock_path.exists() {
+    let npm_lock_path = cwd.join("package-lock.json");
+    // L-01 (npm interop): npm's lockfile is the source of truth when present.
+    // oath-lock.json remains the fallback for repos that have never run
+    // `oath install`, and for workspaces until the workspace planner lands.
+    let use_npm_lock = npm_lock_path.exists() && workspace.is_none();
+    if !use_npm_lock && !lock_path.exists() {
         anyhow::bail!("no lockfile found, run oath install first");
     }
 
@@ -1301,6 +1427,12 @@ async fn cmd_ci() -> Result<()> {
             extract_deps(&pkg, "devDependencies"),
         ),
     };
+    // L-01: when npm's lockfile is the source of truth, verify against it
+    // instead and keep oath-lock.json as derived evidence.
+    if use_npm_lock {
+        return cmd_ci_from_npm_lock(&cwd, &pkg, &deps, &dev_deps, start).await;
+    }
+
     let lockfile = Lockfile::read(&lock_path)?;
     if !lockfile.matches_manifest(&deps, &dev_deps) {
         anyhow::bail!("package.json does not match oath-lock.json, run oath install first");
@@ -5627,5 +5759,53 @@ mod tests {
             safe_bin_entries(&pkg, "pkg"),
             vec![("safe".to_string(), PathBuf::from("bin/safe.js"))]
         );
+    }
+
+    #[test]
+    fn npm_lock_manifest_verifier_accepts_in_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("package-lock.json");
+        std::fs::write(
+            &lock_path,
+            serde_json::json!({
+                "name": "p", "version": "1.0.0", "lockfileVersion": 3,
+                "packages": {
+                    "": {
+                        "dependencies": {"foo": "^1.0.0"},
+                        "devDependencies": {"bar": "^2.0.0"}
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let deps = HashMap::from([("foo".to_string(), "^1.0.0".to_string())]);
+        let dev_deps = HashMap::from([("bar".to_string(), "^2.0.0".to_string())]);
+        assert!(verify_npm_lock_matches_manifest(&lock_path, &deps, &dev_deps).is_ok());
+    }
+
+    #[test]
+    fn npm_lock_manifest_verifier_rejects_out_of_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("package-lock.json");
+        std::fs::write(
+            &lock_path,
+            serde_json::json!({
+                "name": "p", "version": "1.0.0", "lockfileVersion": 3,
+                "packages": { "": { "dependencies": {"foo": "^1.0.0"} } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // package.json added bar but the lockfile wasn't regenerated.
+        let deps = HashMap::from([
+            ("foo".to_string(), "^1.0.0".to_string()),
+            ("bar".to_string(), "^2.0.0".to_string()),
+        ]);
+        let dev_deps = HashMap::new();
+        let err = verify_npm_lock_matches_manifest(&lock_path, &deps, &dev_deps)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("out of sync"), "unexpected error: {err}");
     }
 }
