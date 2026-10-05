@@ -76,13 +76,30 @@ pub fn to_package_lock_v3(plan: &PlacementPlan, graph: &DepGraph, root: &Package
             // absolute path; relativize it against the project root the way
             // npm does.
             if let Some(target) = node.target.as_deref().filter(|s| !s.is_empty()) {
-                entry.insert(
-                    "resolved".to_string(),
-                    Value::String(relativize_target(&plan.project, target)),
-                );
+                let rel = relativize_target(&plan.project, target);
+                entry.insert("resolved".to_string(), Value::String(rel.clone()));
+                entry.insert("link".to_string(), Value::Bool(true));
+                packages.insert(key, Value::Object(entry));
+                // npm also records the link target itself (e.g. "packages/tool")
+                // with the workspace package's metadata, or a later Arborist
+                // run fails with "Missing target in lock file".
+                let mut target_entry = Map::new();
+                target_entry.insert("name".to_string(), Value::String(node.name.clone()));
+                target_entry.insert("version".to_string(), Value::String(node.version.clone()));
+                // Workspace package dependencies from the plan's edges.
+                let mut target_deps = Map::new();
+                for edge in &node.edges {
+                    // edge.spec is the range; resolve via graph if available.
+                    target_deps.insert(edge.name.clone(), Value::String(edge.spec.clone()));
+                }
+                if !target_deps.is_empty() {
+                    target_entry.insert("dependencies".to_string(), Value::Object(target_deps));
+                }
+                packages.insert(rel, Value::Object(target_entry));
+            } else {
+                entry.insert("link".to_string(), Value::Bool(true));
+                packages.insert(key, Value::Object(entry));
             }
-            entry.insert("link".to_string(), Value::Bool(true));
-            packages.insert(key, Value::Object(entry));
             continue;
         }
         entry.insert("version".to_string(), Value::String(node.version.clone()));
@@ -455,11 +472,17 @@ mod tests {
         node.target = Some("/tmp/proj/packages/w".to_string());
         let plan = test_plan(vec![node]);
         let graph = test_graph(vec![graph_node("w", "1.0.0")]);
-        let entry = &to_package_lock_v3(&plan, &graph, &root())["packages"]["node_modules/w"];
+        let packages = &to_package_lock_v3(&plan, &graph, &root())["packages"];
+        let entry = &packages["node_modules/w"];
         assert_eq!(entry["link"], true);
         assert_eq!(entry["resolved"], "packages/w");
         assert!(entry.get("version").is_none());
         assert!(entry.get("integrity").is_none());
+        // The link target itself is also recorded, or Arborist fails on
+        // the next run with "Missing target in lock file".
+        let target = &packages["packages/w"];
+        assert_eq!(target["name"], "w");
+        assert_eq!(target["version"], "1.0.0");
     }
 
     #[test]
