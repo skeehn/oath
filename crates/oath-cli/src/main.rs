@@ -5955,21 +5955,22 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let node = |location: &str, name: &str, version: &str| PlacementNode {
-            location: location.to_string(),
-            install_name: name.to_string(),
-            name: name.to_string(),
-            version: version.to_string(),
-            resolved: None,
-            integrity: None,
-            dev: false,
-            optional: false,
-            has_install_script: false,
-            reuse_existing: false,
-            link: false,
-            target: None,
-            edges: Vec::<PlacementEdge>::new(),
-        };
+        let node =
+            |location: &str, name: &str, version: &str, resolved: Option<&str>| PlacementNode {
+                location: location.to_string(),
+                install_name: name.to_string(),
+                name: name.to_string(),
+                version: version.to_string(),
+                resolved: resolved.map(String::from),
+                integrity: None,
+                dev: false,
+                optional: false,
+                has_install_script: false,
+                reuse_existing: false,
+                link: false,
+                target: None,
+                edges: Vec::<PlacementEdge>::new(),
+            };
         let plan = PlacementPlan {
             schema_version: 1,
             planner: PlannerIdentity {
@@ -5978,8 +5979,18 @@ mod tests {
             },
             project: "p".to_string(),
             nodes: vec![
-                node("node_modules/foo", "foo", "1.2.3"),
-                node("node_modules/bar", "real-bar", "2.0.0"),
+                node(
+                    "node_modules/foo",
+                    "foo",
+                    "1.2.3",
+                    Some("https://x/foo.tgz"),
+                ),
+                node(
+                    "node_modules/bar",
+                    "real-bar",
+                    "2.0.0",
+                    Some("https://x/real-bar.tgz"),
+                ),
             ],
             removed_locations: vec![],
             invalid_edges: vec![],
