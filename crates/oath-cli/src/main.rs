@@ -828,6 +828,34 @@ async fn cmd_install(
         return Ok(());
     }
 
+    // Trust pipeline: warn on potential typosquatting at install time.
+    // This is a "better than npm" feature — npm does not warn on typosquats.
+    if !packages.is_empty() {
+        for spec in &packages {
+            let (name, _) = parse_package_spec(spec);
+            if let Some(popular) = oath_analyze::patterns::check_typosquat(&name) {
+                eprintln!(
+                    "\x1b[33mwarn\x1b[0m potential typosquat: '{}' is similar to popular package '{}'. \
+                     If you meant '{}', use that instead. Continue? (y/N)",
+                    name, popular, popular
+                );
+                // In non-interactive mode (yes_flag), warn but continue.
+                // In interactive mode, prompt for confirmation.
+                if !yes_flag {
+                    use std::io::{self, Write};
+                    print!("  Continue with '{}'? [y/N] ", name);
+                    io::stdout().flush().ok();
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input).ok();
+                    let input = input.trim().to_lowercase();
+                    if input != "y" && input != "yes" {
+                        anyhow::bail!("installation cancelled: potential typosquat '{}'", name);
+                    }
+                }
+            }
+        }
+    }
+
     // npm Arborist is the authoritative placement planner for ordinary
     // package.json installs. Oath retains ownership of fetch, integrity,
     // scanning, CAS materialization, lifecycle policy, and atomic commit.
