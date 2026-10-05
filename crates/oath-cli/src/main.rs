@@ -1270,14 +1270,14 @@ async fn cmd_install(
 /// derived Oath evidence, not as the authority.
 async fn cmd_ci_from_npm_lock(
     cwd: &std::path::Path,
+    npm_lock_path: &std::path::Path,
     pkg: &serde_json::Value,
     deps: &HashMap<String, String>,
     dev_deps: &HashMap<String, String>,
     start: Instant,
 ) -> Result<()> {
-    let npm_lock_path = cwd.join("package-lock.json");
     let optional_deps = extract_deps(pkg, "optionalDependencies");
-    verify_npm_lock_matches_manifest(&npm_lock_path, deps, dev_deps, &optional_deps)?;
+    verify_npm_lock_matches_manifest(npm_lock_path, deps, dev_deps, &optional_deps)?;
 
     let project_name = pkg
         .get("name")
@@ -1297,7 +1297,7 @@ async fn cmd_ci_from_npm_lock(
         ArboristPlanner::plan(cwd)?
     };
     hydrate_missing_registry_metadata(&mut placement_plan).await?;
-    if !plan_matches_npm_lock(&placement_plan, &npm_lock_path)? {
+    if !plan_matches_npm_lock(&placement_plan, npm_lock_path)? {
         anyhow::bail!("placement plan does not match package-lock.json, run oath install first");
     }
     let mut graph = placement_plan.to_dep_graph()?;
@@ -1548,9 +1548,16 @@ async fn cmd_ci() -> Result<()> {
         .unwrap_or_else(|| invoked_from.clone());
     let lock_path = cwd.join("oath-lock.json");
     let npm_lock_path = cwd.join("package-lock.json");
+    let shrinkwrap_path = cwd.join("npm-shrinkwrap.json");
     // L-01 (npm interop): npm's lockfile is the source of truth when present.
-    // oath-lock.json remains the fallback for repos that have never run
-    // `oath install`, and for workspaces until the workspace planner lands.
+    // npm-shrinkwrap.json takes precedence over package-lock.json (npm's own
+    // priority). oath-lock.json remains the fallback for repos that have never
+    // run `oath install`, and for workspaces until the workspace planner lands.
+    let npm_lock_path = if shrinkwrap_path.exists() {
+        shrinkwrap_path
+    } else {
+        npm_lock_path
+    };
     let use_npm_lock = npm_lock_path.exists() && workspace.is_none();
     if !use_npm_lock && !lock_path.exists() {
         anyhow::bail!("no lockfile found, run oath install first");
@@ -1574,7 +1581,7 @@ async fn cmd_ci() -> Result<()> {
     // L-01: when npm's lockfile is the source of truth, verify against it
     // instead and keep oath-lock.json as derived evidence.
     if use_npm_lock {
-        return cmd_ci_from_npm_lock(&cwd, &pkg, &deps, &dev_deps, start).await;
+        return cmd_ci_from_npm_lock(&cwd, &npm_lock_path, &pkg, &deps, &dev_deps, start).await;
     }
 
     let lockfile = Lockfile::read(&lock_path)?;
