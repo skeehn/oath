@@ -1101,8 +1101,8 @@ async fn cmd_install(
     if !frozen_lockfile {
         lockfile.write(&PathBuf::from("oath-lock.json"))?;
         // L-01 (npm interop): also write npm's own lockfile. Like npm, it is
-        // rewritten on every install. No oath flow reads it yet, so this is
-        // purely additive; `npm ci` can consume it directly.
+        // rewritten on every install. `oath ci` reads it as the source of
+        // truth; `npm ci` can consume it directly.
         if let Some(plan) = placement_plan.as_ref() {
             let root = PackageLockRoot {
                 name: project_name.clone(),
@@ -1122,13 +1122,7 @@ async fn cmd_install(
                     .into_iter()
                     .collect(),
             };
-            let json = oath_resolve::to_package_lock_json(plan, &graph, &root);
-            // Atomic update: a crash mid-write must not leave a corrupt
-            // lockfile behind.
-            let tmp = PathBuf::from("package-lock.json.tmp");
-            std::fs::write(&tmp, json).context("failed to write package-lock.json")?;
-            std::fs::rename(&tmp, "package-lock.json")
-                .context("failed to replace package-lock.json")?;
+            write_package_lock(std::path::Path::new("."), plan, &graph, root)?;
         }
     }
 
@@ -1354,6 +1348,23 @@ async fn cmd_ci_from_npm_lock(
 /// in package-lock.json (location -> name@version), for the current platform.
 /// This is the `oath ci` frozen check when npm's lockfile is the source of
 /// truth.
+/// Write npm's `package-lock.json` (v3) atomically to `dir`, derived from an
+/// Arborist placement plan and graph. Like npm, it is rewritten on every
+/// install/update. A crash mid-write must not leave a corrupt lockfile.
+fn write_package_lock(
+    dir: &std::path::Path,
+    plan: &PlacementPlan,
+    graph: &oath_resolve::DepGraph,
+    root: oath_resolve::PackageLockRoot,
+) -> Result<()> {
+    let json = oath_resolve::to_package_lock_json(plan, graph, &root);
+    let tmp = dir.join("package-lock.json.tmp");
+    let dest = dir.join("package-lock.json");
+    std::fs::write(&tmp, json).context("failed to write package-lock.json")?;
+    std::fs::rename(&tmp, &dest).context("failed to replace package-lock.json")?;
+    Ok(())
+}
+
 fn plan_matches_npm_lock(plan: &PlacementPlan, npm_lock_path: &std::path::Path) -> Result<bool> {
     use std::collections::HashSet;
     let data =
@@ -1732,6 +1743,34 @@ async fn cmd_install_workspace(
         &empty_dev_deps,
     );
     lockfile.write(&ws.root.join("oath-lock.json"))?;
+    // L-01 (npm interop): also write npm's lockfile at the workspace root.
+    // Workspace members appear as `link:` entries, as in npm's output.
+    {
+        let root_manifest: serde_json::Value =
+            std::fs::read_to_string(ws.root.join("package.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+        let root = PackageLockRoot {
+            name: root_manifest
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("workspace")
+                .to_string(),
+            version: root_manifest
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("0.0.0")
+                .to_string(),
+            dependencies: external_deps.clone().into_iter().collect(),
+            dev_dependencies: empty_dev_deps.clone().into_iter().collect(),
+            optional_dependencies: extract_deps(&root_manifest, "optionalDependencies")
+                .into_iter()
+                .collect(),
+            peer_dependencies: std::collections::BTreeMap::new(),
+        };
+        write_package_lock(&ws.root, &placement_plan, &graph, root)?;
+    }
 
     // -- Peer dependency warnings ---------------------------------------------
     let peer = &graph.peer_report;
@@ -2015,6 +2054,21 @@ async fn cmd_update(packages: Vec<String>) -> Result<()> {
         &dev_deps,
     );
     lockfile.write(&cwd.join("oath-lock.json"))?;
+    // L-01 (npm interop): refresh npm's lockfile after the update, same as
+    // `oath install` does.
+    {
+        let root = PackageLockRoot {
+            name: pkg["name"].as_str().unwrap_or("project").to_string(),
+            version: pkg["version"].as_str().unwrap_or("0.0.0").to_string(),
+            dependencies: deps.clone().into_iter().collect(),
+            dev_dependencies: dev_deps.clone().into_iter().collect(),
+            optional_dependencies: extract_deps(&pkg, "optionalDependencies")
+                .into_iter()
+                .collect(),
+            peer_dependencies: extract_deps(&pkg, "peerDependencies").into_iter().collect(),
+        };
+        write_package_lock(&cwd, &placement_plan, &graph, root)?;
+    }
     println!("oath: updated {} packages", graph.package_count());
     Ok(())
 }
