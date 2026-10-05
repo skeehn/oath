@@ -206,6 +206,9 @@ enum Commands {
         /// Fail if lockfile is missing or would be changed (for CI)
         #[arg(long, alias = "ci")]
         frozen_lockfile: bool,
+        /// Generate/update package-lock.json without installing node_modules (npm-compatible)
+        #[arg(long, alias = "lockfile-only")]
+        package_lock_only: bool,
     },
     /// Clean install from the lockfile (like `npm ci`): fail if it is missing or would change
     Ci,
@@ -443,6 +446,7 @@ async fn async_main() -> Result<()> {
             min_age,
             global,
             frozen_lockfile,
+            package_lock_only,
         } => {
             cmd_install(
                 packages,
@@ -455,6 +459,7 @@ async fn async_main() -> Result<()> {
                 global,
                 frozen_lockfile,
                 min_age,
+                package_lock_only,
             )
             .await?;
         }
@@ -681,6 +686,7 @@ async fn cmd_install(
     global: bool,
     frozen_lockfile: bool,
     min_age: Option<String>,
+    package_lock_only: bool,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -1087,7 +1093,18 @@ async fn cmd_install(
     let cwd = std::env::current_dir()?;
     let linker = Linker::new((*store_ref).clone())
         .with_external_link_targets(external_link_targets(&cwd, &manifest_doc.value, None));
-    let link_result = if let Some(plan) = placement_plan.as_ref() {
+    // L-03: --package-lock-only skips node_modules entirely; just write the lockfile.
+    let link_result = if package_lock_only {
+        println!("  lockfile only, skipping node_modules");
+        // Dummy result; linking is skipped.
+        oath_store::linker::LinkResult {
+            linked: 0,
+            symlinks: 0,
+            nested: 0,
+            bins: 0,
+            missing: 0,
+        }
+    } else if let Some(plan) = placement_plan.as_ref() {
         linker.link_placement_plan(plan, &cwd)?
     } else {
         linker.link_all(&graph, &cwd)?
@@ -1136,7 +1153,10 @@ async fn cmd_install(
                     .collect(),
             };
             write_package_lock(std::path::Path::new("."), plan, &graph, root)?;
-            write_hidden_lockfile(&cwd)?;
+            // L-02: hidden lockfile only when node_modules was actually installed.
+            if !package_lock_only {
+                write_hidden_lockfile(&cwd)?;
+            }
         }
     }
 
@@ -2097,6 +2117,7 @@ async fn cmd_add(package: &str, dev: bool, yes: bool) -> Result<()> {
         false,
         false,
         None,
+        false,
     )
     .await
 }
