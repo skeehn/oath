@@ -1123,8 +1123,12 @@ async fn cmd_install(
                     .collect(),
             };
             let json = oath_resolve::to_package_lock_json(plan, &graph, &root);
-            std::fs::write("package-lock.json", json)
-                .context("failed to write package-lock.json")?;
+            // Atomic update: a crash mid-write must not leave a corrupt
+            // lockfile behind.
+            let tmp = PathBuf::from("package-lock.json.tmp");
+            std::fs::write(&tmp, json).context("failed to write package-lock.json")?;
+            std::fs::rename(&tmp, "package-lock.json")
+                .context("failed to replace package-lock.json")?;
         }
     }
 
