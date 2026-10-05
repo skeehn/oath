@@ -1282,7 +1282,8 @@ async fn cmd_ci_from_npm_lock(
     start: Instant,
 ) -> Result<()> {
     let npm_lock_path = cwd.join("package-lock.json");
-    verify_npm_lock_matches_manifest(&npm_lock_path, deps, dev_deps)?;
+    let optional_deps = extract_deps(pkg, "optionalDependencies");
+    verify_npm_lock_matches_manifest(&npm_lock_path, deps, dev_deps, &optional_deps)?;
 
     let project_name = pkg
         .get("name")
@@ -1364,11 +1365,30 @@ fn plan_matches_npm_lock(plan: &PlacementPlan, npm_lock_path: &std::path::Path) 
         .and_then(serde_json::Value::as_object)
         .context("package-lock.json has no packages map")?;
 
-    // Expected set from the lockfile, filtered to this platform like the
-    // importer does.
-    let mut expected: HashSet<(String, String)> = HashSet::new();
+    // Collect link targets first: entries whose path is the target of a
+    // `link: true` entry are workspace symlinks, not real packages.
+    let mut link_targets: HashSet<String> = HashSet::new();
     for (path, entry) in packages {
         if path.is_empty() {
+            continue;
+        }
+        if let Some(entry) = entry.as_object()
+            && entry
+                .get("link")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            && let Some(target) = entry.get("resolved").and_then(serde_json::Value::as_str)
+        {
+            link_targets.insert(target.to_string());
+        }
+    }
+
+    // Expected set from the lockfile, filtered to this platform like the
+    // importer does. Includes resolved/integrity so a stale cached plan
+    // can't pass with outdated URLs or hashes.
+    let mut expected: HashSet<(String, String, Option<String>, Option<String>)> = HashSet::new();
+    for (path, entry) in packages {
+        if path.is_empty() || link_targets.contains(path) {
             continue;
         }
         let entry = match entry.as_object() {
@@ -1393,11 +1413,24 @@ fn plan_matches_npm_lock(plan: &PlacementPlan, npm_lock_path: &std::path::Path) 
             .get("name")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| oath_resolve::import::name_from_path(path));
-        expected.insert((path.clone(), format!("{name}@{version}")));
+        let resolved = entry
+            .get("resolved")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+        let integrity = entry
+            .get("integrity")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
+        expected.insert((
+            path.clone(),
+            format!("{name}@{version}"),
+            resolved,
+            integrity,
+        ));
     }
 
     // Actual set from the plan.
-    let mut actual: HashSet<(String, String)> = HashSet::new();
+    let mut actual: HashSet<(String, String, Option<String>, Option<String>)> = HashSet::new();
     for node in &plan.nodes {
         if node.link {
             continue;
@@ -1405,10 +1438,35 @@ fn plan_matches_npm_lock(plan: &PlacementPlan, npm_lock_path: &std::path::Path) 
         actual.insert((
             node.location.clone(),
             format!("{}@{}", node.name, node.version),
+            node.resolved.clone(),
+            node.integrity.clone(),
         ));
     }
 
-    Ok(expected == actual)
+    // Compare location + name@version strictly; compare resolved/integrity
+    // only when the lockfile pins them (a stale cached plan must not pass
+    // with outdated URLs or hashes).
+    if actual.len() != expected.len() {
+        return Ok(false);
+    }
+    for (loc, nv, resolved, integrity) in &actual {
+        let Some((_, _, exp_resolved, exp_integrity)) =
+            expected.iter().find(|(l, n, _, _)| l == loc && n == nv)
+        else {
+            return Ok(false);
+        };
+        if let Some(exp_r) = exp_resolved
+            && resolved.as_ref() != Some(exp_r)
+        {
+            return Ok(false);
+        }
+        if let Some(exp_i) = exp_integrity
+            && integrity.as_ref() != Some(exp_i)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Verify package.json's dependency ranges are in sync with the root entry of
@@ -1417,6 +1475,7 @@ fn verify_npm_lock_matches_manifest(
     npm_lock_path: &std::path::Path,
     deps: &HashMap<String, String>,
     dev_deps: &HashMap<String, String>,
+    optional_deps: &HashMap<String, String>,
 ) -> Result<()> {
     let data =
         std::fs::read_to_string(npm_lock_path).context("failed to read package-lock.json")?;
@@ -1427,7 +1486,11 @@ fn verify_npm_lock_matches_manifest(
         .and_then(|p| p.get(""))
         .and_then(serde_json::Value::as_object)
         .context("package-lock.json has no root packages entry")?;
-    for (section, expected) in [("dependencies", deps), ("devDependencies", dev_deps)] {
+    for (section, expected) in [
+        ("dependencies", deps),
+        ("devDependencies", dev_deps),
+        ("optionalDependencies", optional_deps),
+    ] {
         let locked: HashMap<String, String> = root_entry
             .get(section)
             .and_then(serde_json::Value::as_object)
@@ -5839,7 +5902,9 @@ mod tests {
         .unwrap();
         let deps = HashMap::from([("foo".to_string(), "^1.0.0".to_string())]);
         let dev_deps = HashMap::from([("bar".to_string(), "^2.0.0".to_string())]);
-        assert!(verify_npm_lock_matches_manifest(&lock_path, &deps, &dev_deps).is_ok());
+        assert!(
+            verify_npm_lock_matches_manifest(&lock_path, &deps, &dev_deps, &HashMap::new()).is_ok()
+        );
     }
 
     #[test]
@@ -5861,7 +5926,7 @@ mod tests {
             ("bar".to_string(), "^2.0.0".to_string()),
         ]);
         let dev_deps = HashMap::new();
-        let err = verify_npm_lock_matches_manifest(&lock_path, &deps, &dev_deps)
+        let err = verify_npm_lock_matches_manifest(&lock_path, &deps, &dev_deps, &HashMap::new())
             .unwrap_err()
             .to_string();
         assert!(err.contains("out of sync"), "unexpected error: {err}");
