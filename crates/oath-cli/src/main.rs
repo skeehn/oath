@@ -5866,4 +5866,100 @@ mod tests {
             .to_string();
         assert!(err.contains("out of sync"), "unexpected error: {err}");
     }
+
+    #[test]
+    fn plan_matches_npm_lock_accepts_identical_sets() {
+        use oath_resolve::placement::{PlacementEdge, PlacementNode, PlacementPlan, PlannerIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("package-lock.json");
+        std::fs::write(
+            &lock_path,
+            serde_json::json!({
+                "name": "p", "version": "1.0.0", "lockfileVersion": 3,
+                "packages": {
+                    "": {},
+                    "node_modules/foo": {"version": "1.2.3", "resolved": "https://x/foo.tgz"},
+                    "node_modules/bar": {
+                        "name": "real-bar", "version": "2.0.0",
+                        "resolved": "https://x/real-bar.tgz"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let node = |location: &str, name: &str, version: &str| PlacementNode {
+            location: location.to_string(),
+            install_name: name.to_string(),
+            name: name.to_string(),
+            version: version.to_string(),
+            resolved: None,
+            integrity: None,
+            dev: false,
+            optional: false,
+            has_install_script: false,
+            reuse_existing: false,
+            link: false,
+            target: None,
+            edges: Vec::<PlacementEdge>::new(),
+        };
+        let plan = PlacementPlan {
+            schema_version: 1,
+            planner: PlannerIdentity { name: "test".to_string(), npm: "test".to_string() },
+            project: "p".to_string(),
+            nodes: vec![
+                node("node_modules/foo", "foo", "1.2.3"),
+                node("node_modules/bar", "real-bar", "2.0.0"),
+            ],
+            removed_locations: vec![],
+            invalid_edges: vec![],
+            root_manifest: None,
+            added: vec![],
+        };
+        assert!(plan_matches_npm_lock(&plan, &lock_path).unwrap());
+    }
+
+    #[test]
+    fn plan_matches_npm_lock_rejects_version_drift() {
+        use oath_resolve::placement::{PlacementEdge, PlacementNode, PlacementPlan, PlannerIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("package-lock.json");
+        std::fs::write(
+            &lock_path,
+            serde_json::json!({
+                "name": "p", "version": "1.0.0", "lockfileVersion": 3,
+                "packages": {
+                    "": {},
+                    "node_modules/foo": {"version": "1.2.3", "resolved": "https://x/foo.tgz"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan = PlacementPlan {
+            schema_version: 1,
+            planner: PlannerIdentity { name: "test".to_string(), npm: "test".to_string() },
+            project: "p".to_string(),
+            nodes: vec![PlacementNode {
+                location: "node_modules/foo".to_string(),
+                install_name: "foo".to_string(),
+                name: "foo".to_string(),
+                version: "9.9.9".to_string(),
+                resolved: None,
+                integrity: None,
+                dev: false,
+                optional: false,
+                has_install_script: false,
+                reuse_existing: false,
+                link: false,
+                target: None,
+                edges: Vec::<PlacementEdge>::new(),
+            }],
+            removed_locations: vec![],
+            invalid_edges: vec![],
+            root_manifest: None,
+            added: vec![],
+        };
+        assert!(!plan_matches_npm_lock(&plan, &lock_path).unwrap());
+    }
 }
