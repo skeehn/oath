@@ -153,7 +153,7 @@ pub fn import_npm_lockfile(path: &Path) -> Result<DepGraph> {
 
 /// The package name encoded in a lockfile path: the part after the final
 /// `node_modules/` segment (keeps `@scope/name` intact).
-fn name_from_path(pkg_path: &str) -> &str {
+pub fn name_from_path(pkg_path: &str) -> &str {
     const NM: &str = "node_modules/";
     match pkg_path.rfind(NM) {
         Some(idx) => &pkg_path[idx + NM.len()..],
@@ -187,7 +187,7 @@ fn resolve_dep_path(packages: &Map<String, Value>, from_path: &str, dep: &str) -
 /// Does this lockfile entry's `os`/`cpu` constraint match the current platform?
 /// Mirrors npm: an empty/absent list matches everything; otherwise the current
 /// value must be allowed (and not negated with `!`).
-fn platform_matches(entry: &Map<String, Value>) -> bool {
+pub fn platform_matches(entry: &Map<String, Value>) -> bool {
     matches_list(entry.get("os"), current_npm_os())
         && matches_list(entry.get("cpu"), current_npm_cpu())
 }
