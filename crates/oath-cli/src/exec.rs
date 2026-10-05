@@ -37,6 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// the registry is asked again (bunx's rule; npx asks on every run).
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+#[derive(Clone)]
 pub struct ExecOptions {
     /// Positional arguments: the command (or package spec) and its args.
     pub args: Vec<String>,
@@ -190,6 +191,58 @@ enum Gate {
     Exit(i32),
 }
 
+/// Interactive shell for `oath x` with no arguments (npx-compatible).
+/// Reads commands from stdin, executes each via the exec machinery,
+/// and exits on EOF (Ctrl+D) or the `exit` command.
+async fn run_interactive_shell(base_opts: ExecOptions) -> Result<i32> {
+    use std::io::{self, BufRead, Write};
+
+    println!("oath x interactive shell (Ctrl+D or 'exit' to quit)");
+    print!("oath x> ");
+    io::stdout().flush().ok();
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let line = line.context("failed to read from stdin")?;
+        let line = line.trim();
+        if line.is_empty() {
+            print!("oath x> ");
+            io::stdout().flush().ok();
+            continue;
+        }
+        if line == "exit" || line == "quit" {
+            break;
+        }
+        // Parse the line into args (simple whitespace split).
+        let args: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+        if args.is_empty() {
+            print!("oath x> ");
+            io::stdout().flush().ok();
+            continue;
+        }
+        // Build opts for this command, reusing the base options.
+        // Calling run() with non-empty args executes normally (no recursion
+        // into the interactive shell). Box the future to satisfy the async
+        // recursion requirement.
+        let mut opts = base_opts.clone();
+        opts.args = args;
+        match Box::pin(run(opts)).await {
+            Ok(code) => {
+                if code != 0 {
+                    eprintln!("(exit code {})", code);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {:#}", e);
+            }
+        }
+        print!("oath x> ");
+        io::stdout().flush().ok();
+    }
+    println!();
+    Ok(0)
+}
+
 /// Run `oath x`: resolve the command in libnpmexec's order (project bin,
 /// walk-up `.bin`, global bin, package spec), install into the exec cache
 /// when nothing local satisfies the specs, pass the gate, then launch.
@@ -213,9 +266,9 @@ pub async fn run(opts: ExecOptions) -> Result<i32> {
         );
     }
     if opts.call.is_none() && opts.args.is_empty() && opts.packages.is_empty() {
-        bail!(
-            "oath exec: specify a package or command (an interactive npm shell is not supported); try `oath x <package> [args]`"
-        );
+        // Interactive shell mode (npx-compatible): drop into a REPL where
+        // each command is executed via the exec machinery.
+        return run_interactive_shell(opts).await;
     }
     if opts.offline && opts.prefer_online {
         bail!("--offline and --prefer-online are mutually exclusive");
