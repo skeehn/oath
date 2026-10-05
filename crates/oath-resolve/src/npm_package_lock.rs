@@ -86,6 +86,13 @@ pub fn to_package_lock_v3(plan: &PlacementPlan, graph: &DepGraph, root: &Package
             continue;
         }
         entry.insert("version".to_string(), Value::String(node.version.clone()));
+        // Aliased installs (`"number-check": "npm:is-number@7.0.0"`): npm
+        // records the real package name so the lockfile stays resolvable.
+        // Without it, a later Arborist run reads `node_modules/number-check`
+        // as a package literally named `number-check` and misplans.
+        if node.install_name != node.name {
+            entry.insert("name".to_string(), Value::String(node.name.clone()));
+        }
         if let Some(resolved) = node.resolved.as_deref().filter(|s| !s.is_empty()) {
             entry.insert("resolved".to_string(), Value::String(resolved.to_string()));
         }
@@ -593,6 +600,29 @@ mod tests {
         let link_entry = &value["packages"]["node_modules/w"];
         assert_eq!(link_entry["link"], true);
         assert_eq!(link_entry["resolved"], "packages/w");
+    }
+
+    #[test]
+    fn aliased_install_records_real_name() {
+        // npm: `"number-check": "npm:is-number@7.0.0"` installs to
+        // node_modules/number-check but records name: is-number, or a later
+        // Arborist run misresolves the entry.
+        let mut node = plan_node("node_modules/number-check", "is-number", "7.0.0");
+        node.install_name = "number-check".to_string();
+        let plan = test_plan(vec![node]);
+        let graph = test_graph(vec![graph_node("is-number", "7.0.0")]);
+        let entry =
+            &to_package_lock_v3(&plan, &graph, &root())["packages"]["node_modules/number-check"];
+        assert_eq!(entry["name"], "is-number");
+        assert_eq!(entry["version"], "7.0.0");
+    }
+
+    #[test]
+    fn non_aliased_install_omits_name() {
+        let plan = test_plan(vec![plan_node("node_modules/foo", "foo", "1.2.3")]);
+        let graph = test_graph(vec![graph_node("foo", "1.2.3")]);
+        let entry = &to_package_lock_v3(&plan, &graph, &root())["packages"]["node_modules/foo"];
+        assert!(entry.get("name").is_none());
     }
 
     #[test]

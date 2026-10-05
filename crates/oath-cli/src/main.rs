@@ -19,7 +19,7 @@ use oath_resolve::git::{
 use oath_resolve::graph::{DepNode, PeerResolution};
 use oath_resolve::placement::{ArboristPlanner, PlacementPlan, PlacementRequest};
 use oath_resolve::resolver::{ResolveOptions, Resolver};
-use oath_resolve::{DepGraph, Lockfile};
+use oath_resolve::{DepGraph, Lockfile, PackageLockRoot};
 use oath_store::cas::{ContentStore, PackageVerification};
 use oath_store::linker::Linker;
 use oath_workspace::{WorkspaceRoot, detect_workspace_root};
@@ -1100,6 +1100,36 @@ async fn cmd_install(
     );
     if !frozen_lockfile {
         lockfile.write(&PathBuf::from("oath-lock.json"))?;
+        // L-01 (npm interop): also write npm's own lockfile. Like npm, it is
+        // rewritten on every install. No oath flow reads it yet, so this is
+        // purely additive; `npm ci` can consume it directly.
+        if let Some(plan) = placement_plan.as_ref() {
+            let root = PackageLockRoot {
+                name: project_name.clone(),
+                version: project_version.clone(),
+                dependencies: lock_deps
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                dev_dependencies: lock_dev_deps
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                optional_dependencies: extract_deps(&manifest_doc.value, "optionalDependencies")
+                    .into_iter()
+                    .collect(),
+                peer_dependencies: extract_deps(&manifest_doc.value, "peerDependencies")
+                    .into_iter()
+                    .collect(),
+            };
+            let json = oath_resolve::to_package_lock_json(plan, &graph, &root);
+            // Atomic update: a crash mid-write must not leave a corrupt
+            // lockfile behind.
+            let tmp = PathBuf::from("package-lock.json.tmp");
+            std::fs::write(&tmp, json).context("failed to write package-lock.json")?;
+            std::fs::rename(&tmp, "package-lock.json")
+                .context("failed to replace package-lock.json")?;
+        }
     }
 
     // Write package.json only for an add request, exactly as npm would.
