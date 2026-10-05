@@ -272,15 +272,21 @@ fn find_graph_node<'a>(
 /// Make a link target lockfile-relative: npm records link targets as paths
 /// relative to the lockfile (e.g. `"packages/foo"`), not absolute paths.
 fn relativize_target(project: &str, target: &str) -> String {
-    let project = project.trim_end_matches('/');
-    if let Some(rest) = target
-        .strip_prefix(project)
-        .and_then(|r| r.strip_prefix('/'))
-    {
-        if rest.is_empty() {
-            return ".".to_string();
+    // Normalize Windows verbatim paths (\\?\) and separators before comparing.
+    fn strip_verbatim(s: &str) -> &str {
+        s.strip_prefix(r"\\?\").unwrap_or(s)
+    }
+    let project = strip_verbatim(project).trim_end_matches(['/', '\\']);
+    let target = strip_verbatim(target);
+    // Try both separators when stripping the project prefix.
+    for sep in ['/', '\\'] {
+        let prefix = format!("{project}{sep}");
+        if let Some(rest) = target.strip_prefix(&prefix) {
+            if rest.is_empty() {
+                return ".".to_string();
+            }
+            return rest.replace('\\', "/");
         }
-        return rest.replace('\\', "/");
     }
     target.replace('\\', "/")
 }
