@@ -77,6 +77,8 @@ async function main () {
   if (request.rm && request.rm.length) idealOptions.rm = request.rm
   if (request.update === true || (Array.isArray(request.update) && request.update.length)) idealOptions.update = request.update
   if (request.save_type) idealOptions.saveType = request.save_type
+  // Omit dependency types (npm-compatible --omit flag).
+  if (Array.isArray(request.omit) && request.omit.length) idealOptions.omit = request.omit
   // Compute npm's final platform, optional, peer, and pruning decisions without
   // writing package contents. Oath remains the only materialization authority.
   const tree = await arborist.reify({ ...idealOptions, dryRun: true, ignoreScripts: true })
