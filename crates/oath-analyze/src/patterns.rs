@@ -590,22 +590,28 @@ pub static POPULAR_PACKAGES: &[&str] = &[
 
 /// Check if a package name is a potential typosquat of a popular package.
 /// Returns the popular package name if the input is suspiciously similar
-/// (edit distance 1-2) but not an exact match.
+/// but not an exact match.
 pub fn check_typosquat(name: &str) -> Option<&'static str> {
-    // Skip scoped packages for now (they're less commonly typosquatted)
-    // and exact matches.
     let name_lower = name.to_lowercase();
+    // First, check for exact matches across all popular packages.
+    // If it's an exact match, it's not a typosquat.
+    if POPULAR_PACKAGES.contains(&name_lower.as_str()) {
+        return None;
+    }
+    // Find the popular package with the smallest edit distance.
+    let mut best: Option<(&'static str, usize)> = None;
     for popular in POPULAR_PACKAGES {
-        if name_lower == *popular {
-            continue;
-        }
         let distance = edit_distance(&name_lower, popular);
-        // Distance 1-2 is suspicious; 0 is exact match (skipped above).
-        if (1..=2).contains(&distance) {
-            return Some(popular);
+        // Use 1-edit limit for short targets (<=5 chars), 2-edit otherwise.
+        // Short names have higher collision risk, so be more conservative.
+        let max_distance = if popular.len() <= 5 { 1 } else { 2 };
+        if (1..=max_distance).contains(&distance)
+            && best.is_none_or(|(_, best_dist)| distance < best_dist)
+        {
+            best = Some((popular, distance));
         }
     }
-    None
+    best.map(|(popular, _)| popular)
 }
 
 /// Compute the Levenshtein edit distance between two strings.
