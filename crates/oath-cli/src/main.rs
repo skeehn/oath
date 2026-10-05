@@ -5869,7 +5869,9 @@ mod tests {
 
     #[test]
     fn plan_matches_npm_lock_accepts_identical_sets() {
-        use oath_resolve::placement::{PlacementEdge, PlacementNode, PlacementPlan, PlannerIdentity};
+        use oath_resolve::placement::{
+            PlacementEdge, PlacementNode, PlacementPlan, PlannerIdentity,
+        };
         let dir = tempfile::tempdir().unwrap();
         let lock_path = dir.path().join("package-lock.json");
         std::fs::write(
@@ -5905,7 +5907,10 @@ mod tests {
         };
         let plan = PlacementPlan {
             schema_version: 1,
-            planner: PlannerIdentity { name: "test".to_string(), npm: "test".to_string() },
+            planner: PlannerIdentity {
+                name: "test".to_string(),
+                npm: "test".to_string(),
+            },
             project: "p".to_string(),
             nodes: vec![
                 node("node_modules/foo", "foo", "1.2.3"),
@@ -5921,7 +5926,9 @@ mod tests {
 
     #[test]
     fn plan_matches_npm_lock_rejects_version_drift() {
-        use oath_resolve::placement::{PlacementEdge, PlacementNode, PlacementPlan, PlannerIdentity};
+        use oath_resolve::placement::{
+            PlacementEdge, PlacementNode, PlacementPlan, PlannerIdentity,
+        };
         let dir = tempfile::tempdir().unwrap();
         let lock_path = dir.path().join("package-lock.json");
         std::fs::write(
@@ -5938,7 +5945,10 @@ mod tests {
         .unwrap();
         let plan = PlacementPlan {
             schema_version: 1,
-            planner: PlannerIdentity { name: "test".to_string(), npm: "test".to_string() },
+            planner: PlannerIdentity {
+                name: "test".to_string(),
+                npm: "test".to_string(),
+            },
             project: "p".to_string(),
             nodes: vec![PlacementNode {
                 location: "node_modules/foo".to_string(),
