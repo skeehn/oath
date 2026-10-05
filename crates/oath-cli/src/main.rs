@@ -209,16 +209,49 @@ enum Commands {
         /// Generate/update package-lock.json without installing node_modules (npm-compatible)
         #[arg(long, alias = "lockfile-only")]
         package_lock_only: bool,
+        /// Omit dependency types (e.g. --omit=dev, --omit=optional, --omit=peer)
+        #[arg(long, value_delimiter = ',')]
+        omit: Vec<String>,
+        /// Shorthand for --omit=dev (npm-compatible)
+        #[arg(long)]
+        production: bool,
+        /// Do not update package.json when adding packages (npm-compatible)
+        #[arg(long)]
+        no_save: bool,
+        /// Save exact version instead of range (npm-compatible)
+        #[arg(long, alias = "save-exact")]
+        save_exact: bool,
+        /// Save to peerDependencies (npm-compatible)
+        #[arg(long)]
+        save_peer: bool,
+        /// Use cache only, do not hit network (npm-compatible)
+        #[arg(long)]
+        offline: bool,
+        /// Registry URL (npm-compatible)
+        #[arg(long)]
+        registry: Option<String>,
+        /// Install prefix directory (npm-compatible)
+        #[arg(long)]
+        prefix: Option<String>,
     },
     /// Clean install from the lockfile (like `npm ci`): fail if it is missing or would change
     Ci,
-    /// Add a dependency
+    /// Add a dependency (or multiple)
     Add {
-        package: String,
+        packages: Vec<String>,
         #[arg(short = 'D', long)]
         dev: bool,
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Do not update package.json (npm-compatible)
+        #[arg(long)]
+        no_save: bool,
+        /// Save exact version instead of range (npm-compatible)
+        #[arg(long, alias = "save-exact")]
+        save_exact: bool,
+        /// Save to peerDependencies (npm-compatible)
+        #[arg(long)]
+        save_peer: bool,
     },
     /// Update dependencies within package.json ranges
     Update { packages: Vec<String> },
@@ -447,6 +480,14 @@ async fn async_main() -> Result<()> {
             global,
             frozen_lockfile,
             package_lock_only,
+            omit,
+            production,
+            no_save,
+            save_exact,
+            save_peer,
+            offline,
+            registry,
+            prefix,
         } => {
             cmd_install(
                 packages,
@@ -460,11 +501,26 @@ async fn async_main() -> Result<()> {
                 frozen_lockfile,
                 min_age,
                 package_lock_only,
+                omit,
+                production,
+                no_save,
+                save_exact,
+                save_peer,
+                offline,
+                registry,
+                prefix,
             )
             .await?;
         }
-        Commands::Add { package, dev, yes } => {
-            cmd_add(&package, dev, yes).await?;
+        Commands::Add {
+            packages,
+            dev,
+            yes,
+            no_save,
+            save_exact,
+            save_peer,
+        } => {
+            cmd_add_multi(&packages, dev, yes, no_save, save_exact, save_peer).await?;
         }
         Commands::Update { packages } => {
             cmd_update(packages).await?;
@@ -687,8 +743,34 @@ async fn cmd_install(
     frozen_lockfile: bool,
     min_age: Option<String>,
     package_lock_only: bool,
+    omit: Vec<String>,
+    production: bool,
+    no_save: bool,
+    _save_exact: bool,
+    _save_peer: bool,
+    offline: bool,
+    _registry: Option<String>,
+    prefix: Option<String>,
 ) -> Result<()> {
     let start = Instant::now();
+
+    // TODO: --save-exact, --save-peer, --registry not yet implemented.
+    if _save_exact {
+        eprintln!("warn: --save-exact not yet implemented, ignoring");
+    }
+    if _save_peer {
+        eprintln!("warn: --save-peer not yet implemented, ignoring");
+    }
+    if _registry.is_some() {
+        eprintln!("warn: --registry not yet implemented, ignoring");
+    }
+
+    // ---- Prefix handling (npm-compatible) -----------------------------------
+    // If --prefix is given, change to that directory for the install.
+    if let Some(p) = prefix {
+        std::env::set_current_dir(&p)
+            .with_context(|| format!("failed to change to prefix directory: {}", p))?;
+    }
 
     // ---- Global install shortcut --------------------------------------------
     if global {
@@ -826,7 +908,20 @@ async fn cmd_install(
     };
 
     let deps = extract_deps(&manifest_doc.value, "dependencies");
-    let dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
+    let mut dev_deps = extract_deps(&manifest_doc.value, "devDependencies");
+    let mut optional_deps = extract_deps(&manifest_doc.value, "optionalDependencies");
+    // --omit and --production (npm-compatible): filter out omitted dep types.
+    // --production is shorthand for --omit=dev.
+    let omit_dev = production || omit.iter().any(|o| o == "dev" || o == "development");
+    let omit_optional = omit.iter().any(|o| o == "optional");
+    if omit_dev {
+        dev_deps.clear();
+        println!("  omitting devDependencies (--omit=dev)");
+    }
+    if omit_optional {
+        optional_deps.clear();
+        println!("  omitting optionalDependencies (--omit=optional)");
+    }
     let trusted_deps: HashSet<String> = manifest_doc
         .value
         .get("trustedDependencies")
@@ -855,6 +950,12 @@ async fn cmd_install(
             );
             lockfile.to_graph()
         } else {
+            // --offline: fail if we would need network (npm-compatible).
+            if offline {
+                anyhow::bail!(
+                    "cannot resolve dependencies in offline mode: lockfile is missing or out of date"
+                );
+            }
             println!("oath: resolving {total_direct} dependencies...");
             let client = RegistryClient::default_client()?;
             let options = ResolveOptions {
@@ -1172,7 +1273,8 @@ async fn cmd_install(
     }
 
     // Write package.json only for an add request, exactly as npm would.
-    if !packages.is_empty() {
+    // --no-save skips the package.json update (npm-compatible).
+    if !packages.is_empty() && !no_save {
         manifest_doc.save()?;
     }
 
@@ -2134,9 +2236,16 @@ fn cmd_perms(package: &str) -> Result<()> {
 
 // ---- ADD --------------------------------------------------------------------
 
-async fn cmd_add(package: &str, dev: bool, yes: bool) -> Result<()> {
+async fn cmd_add_multi(
+    packages: &[String],
+    dev: bool,
+    yes: bool,
+    no_save: bool,
+    save_exact: bool,
+    save_peer: bool,
+) -> Result<()> {
     cmd_install(
-        vec![package.to_string()],
+        packages.to_vec(),
         dev,
         false,
         true,
@@ -2147,6 +2256,14 @@ async fn cmd_add(package: &str, dev: bool, yes: bool) -> Result<()> {
         false,
         None,
         false,
+        Vec::new(),
+        false,
+        no_save,
+        save_exact,
+        save_peer,
+        false,
+        None,
+        None,
     )
     .await
 }
