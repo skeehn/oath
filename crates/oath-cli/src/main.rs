@@ -716,6 +716,19 @@ async fn cmd_install(
 
     // ---- Single-package install ---------------------------------------------
 
+    // L-02: fast no-op path. If package-lock.json matches the hidden lockfile
+    // in node_modules, the tree is already installed — skip planning entirely.
+    // This is how npm/Bun achieve millisecond no-op installs.
+    if packages.is_empty()
+        && workspace.is_none()
+        && !dry_run
+        && !frozen_lockfile
+        && is_noop_install(&cwd)
+    {
+        println!("  up to date");
+        return Ok(());
+    }
+
     // npm Arborist is the authoritative placement planner for ordinary
     // package.json installs. Oath retains ownership of fetch, integrity,
     // scanning, CAS materialization, lifecycle policy, and atomic commit.
@@ -1123,6 +1136,7 @@ async fn cmd_install(
                     .collect(),
             };
             write_package_lock(std::path::Path::new("."), plan, &graph, root)?;
+            write_hidden_lockfile(&cwd)?;
         }
     }
 
@@ -1348,6 +1362,47 @@ async fn cmd_ci_from_npm_lock(
 /// in package-lock.json (location -> name@version), for the current platform.
 /// This is the `oath ci` frozen check when npm's lockfile is the source of
 /// truth.
+/// Check if this is a no-op install: package-lock.json exists and matches the
+/// hidden lockfile in node_modules, meaning the tree is already installed.
+fn is_noop_install(cwd: &std::path::Path) -> bool {
+    let lock_path = cwd.join("package-lock.json");
+    let hidden_path = cwd.join("node_modules").join(".package-lock.json");
+    if !lock_path.exists() || !hidden_path.exists() {
+        return false;
+    }
+    // Compare file contents (fast path: compare sizes first).
+    let Ok(lock_meta) = std::fs::metadata(&lock_path) else {
+        return false;
+    };
+    let Ok(hidden_meta) = std::fs::metadata(&hidden_path) else {
+        return false;
+    };
+    if lock_meta.len() != hidden_meta.len() {
+        return false;
+    }
+    let Ok(lock_content) = std::fs::read(&lock_path) else {
+        return false;
+    };
+    let Ok(hidden_content) = std::fs::read(&hidden_path) else {
+        return false;
+    };
+    lock_content == hidden_content
+}
+
+/// Write the hidden lockfile to node_modules after a successful install.
+/// This enables the fast no-op path on the next run.
+fn write_hidden_lockfile(cwd: &std::path::Path) -> Result<()> {
+    let lock_path = cwd.join("package-lock.json");
+    let hidden_path = cwd.join("node_modules").join(".package-lock.json");
+    if !lock_path.exists() {
+        return Ok(());
+    }
+    // Ensure node_modules exists.
+    std::fs::create_dir_all(hidden_path.parent().unwrap())?;
+    std::fs::copy(&lock_path, &hidden_path).context("failed to write hidden lockfile")?;
+    Ok(())
+}
+
 /// Write npm's `package-lock.json` (v3) atomically to `dir`, derived from an
 /// Arborist placement plan and graph. Like npm, it is rewritten on every
 /// install/update. A crash mid-write must not leave a corrupt lockfile.
@@ -1789,6 +1844,7 @@ async fn cmd_install_workspace(
             peer_dependencies: std::collections::BTreeMap::new(),
         };
         write_package_lock(&ws.root, &placement_plan, &graph, root)?;
+        write_hidden_lockfile(&ws.root)?;
     }
 
     // -- Peer dependency warnings ---------------------------------------------
@@ -2087,6 +2143,7 @@ async fn cmd_update(packages: Vec<String>) -> Result<()> {
             peer_dependencies: extract_deps(&pkg, "peerDependencies").into_iter().collect(),
         };
         write_package_lock(&cwd, &placement_plan, &graph, root)?;
+        write_hidden_lockfile(&cwd)?;
     }
     println!("oath: updated {} packages", graph.package_count());
     Ok(())
