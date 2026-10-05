@@ -587,3 +587,85 @@ pub static POPULAR_PACKAGES: &[&str] = &[
     "nvm",
     "node-gyp",
 ];
+
+/// Check if a package name is a potential typosquat of a popular package.
+/// Returns the popular package name if the input is suspiciously similar
+/// but not an exact match.
+pub fn check_typosquat(name: &str) -> Option<&'static str> {
+    let name_lower = name.to_lowercase();
+    // First, check for exact matches across all popular packages.
+    // If it's an exact match, it's not a typosquat.
+    if POPULAR_PACKAGES.contains(&name_lower.as_str()) {
+        return None;
+    }
+    // Find the popular package with the smallest edit distance.
+    let mut best: Option<(&'static str, usize)> = None;
+    for popular in POPULAR_PACKAGES {
+        let distance = edit_distance(&name_lower, popular);
+        // Use 1-edit limit for short targets (<=5 chars), 2-edit otherwise.
+        // Short names have higher collision risk, so be more conservative.
+        let max_distance = if popular.len() <= 5 { 1 } else { 2 };
+        if (1..=max_distance).contains(&distance)
+            && best.is_none_or(|(_, best_dist)| distance < best_dist)
+        {
+            best = Some((popular, distance));
+        }
+    }
+    best.map(|(popular, _)| popular)
+}
+
+/// Compute the Levenshtein edit distance between two strings.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min((curr[j - 1] + 1).min(prev[j - 1] + cost));
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+#[cfg(test)]
+mod typosquat_tests {
+    use super::*;
+
+    #[test]
+    fn detects_simple_typosquat() {
+        // "rect" is distance 1 from "react"
+        assert_eq!(check_typosquat("rect"), Some("react"));
+        // "expres" is distance 1 from "express"
+        assert_eq!(check_typosquat("expres"), Some("express"));
+    }
+
+    #[test]
+    fn ignores_exact_matches() {
+        assert_eq!(check_typosquat("react"), None);
+        assert_eq!(check_typosquat("express"), None);
+    }
+
+    #[test]
+    fn ignores_dissimilar_names() {
+        assert_eq!(check_typosquat("my-unique-package-12345"), None);
+    }
+}
