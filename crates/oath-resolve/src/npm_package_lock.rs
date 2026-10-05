@@ -86,14 +86,36 @@ pub fn to_package_lock_v3(plan: &PlacementPlan, graph: &DepGraph, root: &Package
                 let mut target_entry = Map::new();
                 target_entry.insert("name".to_string(), Value::String(node.name.clone()));
                 target_entry.insert("version".to_string(), Value::String(node.version.clone()));
-                // Workspace package dependencies from the plan's edges.
+                // Workspace package dependencies from the plan's edges,
+                // classified by type like the non-link branch.
                 let mut target_deps = Map::new();
+                let mut target_opt_deps = Map::new();
+                let mut target_peer_deps = Map::new();
                 for edge in &node.edges {
                     // edge.spec is the range; resolve via graph if available.
-                    target_deps.insert(edge.name.clone(), Value::String(edge.spec.clone()));
+                    let map = if edge.dependency_type.starts_with("peer") {
+                        &mut target_peer_deps
+                    } else if edge.dependency_type == "optional" {
+                        &mut target_opt_deps
+                    } else {
+                        &mut target_deps
+                    };
+                    map.insert(edge.name.clone(), Value::String(edge.spec.clone()));
                 }
                 if !target_deps.is_empty() {
                     target_entry.insert("dependencies".to_string(), Value::Object(target_deps));
+                }
+                if !target_opt_deps.is_empty() {
+                    target_entry.insert(
+                        "optionalDependencies".to_string(),
+                        Value::Object(target_opt_deps),
+                    );
+                }
+                if !target_peer_deps.is_empty() {
+                    target_entry.insert(
+                        "peerDependencies".to_string(),
+                        Value::Object(target_peer_deps),
+                    );
                 }
                 packages.insert(rel, Value::Object(target_entry));
             } else {

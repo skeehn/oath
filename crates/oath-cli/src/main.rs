@@ -1357,11 +1357,23 @@ fn write_package_lock(
     graph: &oath_resolve::DepGraph,
     root: oath_resolve::PackageLockRoot,
 ) -> Result<()> {
+    use std::io::Write;
     let json = oath_resolve::to_package_lock_json(plan, graph, &root);
     let tmp = dir.join("package-lock.json.tmp");
     let dest = dir.join("package-lock.json");
-    std::fs::write(&tmp, json).context("failed to write package-lock.json")?;
+    // Write + fsync the temp file so the rename never exposes a torn write.
+    let mut f = std::fs::File::create(&tmp).context("failed to write package-lock.json")?;
+    f.write_all(json.as_bytes())
+        .context("failed to write package-lock.json")?;
+    f.sync_all().context("failed to sync package-lock.json")?;
+    drop(f);
     std::fs::rename(&tmp, &dest).context("failed to replace package-lock.json")?;
+    // Fsync the directory so the rename itself is durable on Unix.
+    #[cfg(unix)]
+    {
+        let dir_fd = std::fs::File::open(dir).context("failed to open dir for sync")?;
+        dir_fd.sync_all().context("failed to sync dir")?;
+    }
     Ok(())
 }
 
