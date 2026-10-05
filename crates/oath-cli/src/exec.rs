@@ -197,27 +197,41 @@ enum Gate {
 async fn run_interactive_shell(base_opts: ExecOptions) -> Result<i32> {
     use std::io::{self, BufRead, Write};
 
+    // Don't enter the shell in JSON assessment mode; that's a programming
+    // error (the user asked for a JSON document, not a REPL).
+    if base_opts.json || base_opts.dry_run {
+        bail!(
+            "oath exec: specify a package or command; interactive shell is not available with --json or --dry-run"
+        );
+    }
+
     println!("oath x interactive shell (Ctrl+D or 'exit' to quit)");
-    print!("oath x> ");
-    io::stdout().flush().ok();
     let stdin = io::stdin();
 
-    for line in stdin.lock().lines() {
-        let line = line.context("failed to read from stdin")?;
+    loop {
+        print!("oath x> ");
+        io::stdout().flush().ok();
+        // Read one line and immediately release the stdin lock before
+        // executing, so child processes can use stdin.
+        let line = {
+            let mut handle = stdin.lock();
+            let mut buf = String::new();
+            match handle.read_line(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(_) => buf,
+                Err(e) => return Err(e).context("failed to read from stdin"),
+            }
+        };
         let line = line.trim();
         if line.is_empty() {
-            print!("oath x> ");
-            io::stdout().flush().ok();
             continue;
         }
         if line == "exit" || line == "quit" {
             break;
         }
-        // Parse the line into args (simple whitespace split).
-        let args: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
+        // Parse shell-like arguments, preserving quoted strings.
+        let args = parse_shell_args(line);
         if args.is_empty() {
-            print!("oath x> ");
-            io::stdout().flush().ok();
             continue;
         }
         // Build opts for this command, reusing the base options.
@@ -236,11 +250,59 @@ async fn run_interactive_shell(base_opts: ExecOptions) -> Result<i32> {
                 eprintln!("error: {:#}", e);
             }
         }
-        print!("oath x> ");
-        io::stdout().flush().ok();
     }
     println!();
     Ok(0)
+}
+
+/// Parse a command line into arguments, handling single and double quotes.
+/// This is a minimal shell-like parser for the interactive REPL.
+fn parse_shell_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '\\' if in_double => {
+                // Handle escape sequences in double quotes.
+                if let Some(next) = chars.next() {
+                    match next {
+                        'n' => current.push('\n'),
+                        't' => current.push('\t'),
+                        '\\' => current.push('\\'),
+                        '"' => current.push('"'),
+                        _ => {
+                            current.push('\\');
+                            current.push(next);
+                        }
+                    }
+                } else {
+                    current.push('\\');
+                }
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
 }
 
 /// Run `oath x`: resolve the command in libnpmexec's order (project bin,
@@ -2287,5 +2349,40 @@ mod tests {
     fn thousands_are_grouped() {
         assert_eq!(group_thousands(999), "999");
         assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+}
+
+#[cfg(test)]
+mod interactive_shell_tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_args() {
+        assert_eq!(
+            parse_shell_args("tsc --version"),
+            vec!["tsc".to_string(), "--version".to_string()]
+        );
+    }
+
+    #[test]
+    fn preserves_quoted_args() {
+        assert_eq!(
+            parse_shell_args(r#"prettier --write "my file.js""#),
+            vec![
+                "prettier".to_string(),
+                "--write".to_string(),
+                "my file.js".to_string()
+            ]
+        );
+        assert_eq!(
+            parse_shell_args("echo 'hello world'"),
+            vec!["echo".to_string(), "hello world".to_string()]
+        );
+    }
+
+    #[test]
+    fn handles_empty_and_whitespace() {
+        assert!(parse_shell_args("").is_empty());
+        assert!(parse_shell_args("   ").is_empty());
     }
 }
