@@ -46,7 +46,7 @@ jobs:
           OATH_PROJECT_SHARDS: 20
           OATH_PROJECT_PREFLIGHT_OUTPUT: compat-results/preflight/preflight-${{ matrix.shard }}.json
           OATH_PROJECT_TIMEOUT_MS: 1200000
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: project-preflight-${{ matrix.shard }}
@@ -78,7 +78,7 @@ jobs:
           merge-multiple: true
       - name: Select 25 eligible projects per category
         run: node scripts/project-corpus.mjs merge-preflight
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: project-corpus-selection
@@ -91,7 +91,7 @@ jobs:
           subject-path: |
             tests/compat/projects.lock.json
             tests/compat/projects.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: proposed-projects-lock
           path: |
